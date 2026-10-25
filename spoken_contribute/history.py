@@ -1,0 +1,226 @@
+"""Archiv und Verlauf aller Uploads.
+
+Jeder Upload bekommt einen eigenen Ordner unter verlauf/ im Datenordner:
+  eintrag.json   wann, was, aus welcher Version, Ergebnis laut Server oder der Fehler
+  daten.json.gz  genau das, was gesendet wurde, und die Antworten des Servers
+  originale/     die SpokenContributions-Dateien, wie sie vor dem Leeren aussahen
+
+Nichts davon wird automatisch gelöscht. eintrag.json wird zuletzt geschrieben: Ein Ordner ohne
+sie ist ein abgebrochener Eintrag und erscheint nicht im Verlauf."""
+from __future__ import annotations
+
+import gzip
+import itertools
+import json
+import re
+import shutil
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+
+from . import system
+from .wowdata import FLAVOR_NAMES, envelopes_in, parse_envelope, summarize
+
+ROOT = system.data_dir() / "verlauf"
+INFO, DATA, ORIGINALS = "eintrag.json", "daten.json.gz", "originale"
+KIND_LABELS = {"zeilen": "Gesammelte Zeilen", "npc-texte": "NPC-Texte"}
+SOURCE_NAMES = {"quests": "Quest", "books": "Buch", "readables": "Buch"}
+EVENT_NAMES = {"detail": "Annahme", "progress": "Fortschritt", "complete": "Abschluss",
+               "greeting": "Begrüßung", "gossip": "Gespräch"}
+
+
+@dataclass
+class Entry:
+    folder: Path
+    info: dict
+
+    @property
+    def time(self) -> datetime:
+        return datetime.fromisoformat(self.info["zeit"])
+
+    @property
+    def failed(self) -> bool:
+        return self.info.get("status") != "ok"
+
+    def payload(self) -> dict | None:
+        """Das Gesendete samt Antwort; None, wenn nichts gespeichert ist (fehlgeschlagener Upload)."""
+        try:
+            with gzip.open(self.folder / DATA, "rt", encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return None
+
+
+# ---------------------------------------------------------------- schreiben
+
+def record(kind: str, info: dict, payload: dict | None = None,
+           originals: list[tuple[Path, str]] = (), when: datetime | None = None) -> Entry:
+    """Einen Upload archivieren. originals: (Datei, Name im Archiv) – werden kopiert."""
+    when = when or datetime.now().astimezone()
+    folder = _new_folder(when, kind)
+    if payload is not None:
+        with gzip.open(folder / DATA, "wt", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=1)
+    for source, name in originals:
+        target = folder / ORIGINALS / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    info = {"zeit": when.isoformat(timespec="seconds"), "art": kind, **info}
+    system.write_file(folder / INFO, json.dumps(info, ensure_ascii=False, indent=2))
+    return Entry(folder, info)
+
+
+def _new_folder(when: datetime, kind: str) -> Path:
+    stamp = when.strftime("%Y-%m-%d_%H-%M-%S")
+    for n in itertools.count(1):
+        folder = ROOT / (f"{stamp}_{kind}" if n == 1 else f"{stamp}_{kind}-{n}")
+        try:
+            folder.mkdir(parents=True)
+            return folder
+        except FileExistsError:
+            continue
+
+
+# Sicherungen des früheren Skripts: <Zeit>_[<Version>_]<Account>_SpokenContributions.lua[.bak]
+OLD_BACKUP = re.compile(r"(\d{4}-\d\d-\d\d_\d\d-\d\d-\d\d)_(.+)_(SpokenContributions\.lua(?:\.bak)?)")
+
+
+def migrate_old_archive():
+    """Übernimmt die losen Sicherungen des früheren Skripts aus dem Datenordner in den Verlauf."""
+    groups: dict[str, list[tuple[Path, re.Match]]] = {}
+    for path in system.data_dir().glob("*_SpokenContributions.lua*"):
+        match = OLD_BACKUP.fullmatch(path.name)
+        if match:
+            groups.setdefault(match.group(1), []).append((path, match))
+    for stamp, files in sorted(groups.items()):
+        envelopes, originals, versions = [], [], []
+        for path, match in sorted(files):
+            flavor, _, account = match.group(2).rpartition("_")
+            flavor = flavor or "classic_era"  # die erste Fassung kannte nur Classic Era
+            name = FLAVOR_NAMES.get(f"_{flavor}_", flavor)
+            if name not in versions:
+                versions.append(name)
+            envelopes += envelopes_in(path)
+            originals.append((path, f"{flavor}/{account}/{match.group(3)}"))
+        envelopes = list(dict.fromkeys(envelopes))
+        kinds, titles = summarize(envelopes)
+        record("zeilen",
+               {"status": "ok", "versionen": versions, "anzahl": len(envelopes),
+                "zusammenfassung": kinds, "titel": titles,
+                "hinweis": "Aus dem Archiv des früheren Skripts übernommen; die Antwort des Servers "
+                           "wurde damals nicht gespeichert."},
+               payload={"gesendet": {"envelopes": envelopes}}, originals=originals,
+               when=datetime.strptime(stamp, "%Y-%m-%d_%H-%M-%S").astimezone())
+        for path, _ in files:
+            path.unlink()
+
+
+# ---------------------------------------------------------------- lesen und anzeigen
+
+def entries() -> list[Entry]:
+    """Alle archivierten Uploads, die neuesten zuerst."""
+    found = []
+    for path in ROOT.glob(f"*/{INFO}"):
+        try:
+            entry = Entry(path.parent, json.loads(path.read_text(encoding="utf-8")))
+            entry.time  # prüft, ob der Zeitpunkt lesbar ist
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            continue
+        found.append(entry)
+    return sorted(found, key=lambda e: e.time, reverse=True)
+
+
+def result_text(info: dict) -> str:
+    """Kurzfassung des Ergebnisses, z. B. „12 neu, 3 schon bekannt“."""
+    if info.get("status") != "ok":
+        return "Fehlgeschlagen"
+    result = info.get("ergebnis")
+    if not result:
+        return "gesendet (Antwort nicht gespeichert)"
+    parts = [f"{result.get('neu', 0)} neu"]
+    for key, label in (("bekannt", "schon bekannt"), ("aktualisiert", "aktualisiert"),
+                       ("abgelehnt", "nicht verwendbar")):
+        if result.get(key):
+            parts.append(f"{result[key]} {label}")
+    return ", ".join(parts)
+
+
+def row(entry: Entry) -> tuple:
+    """Eine Zeile der Verlaufstabelle: Zeitpunkt, Art, Version, Anzahl, Ergebnis."""
+    info = entry.info
+    version = ", ".join(info.get("versionen", []))
+    if info.get("sprache"):
+        version += f" ({info['sprache']})"
+    return (entry.time.astimezone().strftime("%d.%m.%Y  %H:%M"), KIND_LABELS.get(info.get("art"), "?"),
+            version, info.get("anzahl", ""), result_text(info))
+
+
+def totals(found: list[Entry]) -> str:
+    """Die Summenzeile über dem Verlauf."""
+    ok = [e for e in found if not e.failed]
+    lines = sum(e.info.get("anzahl", 0) for e in ok if e.info.get("art") == "zeilen")
+    texts = sum(e.info.get("anzahl", 0) for e in ok if e.info.get("art") == "npc-texte")
+    answered = [e.info["ergebnis"] for e in ok if e.info.get("ergebnis")]
+    text = f"{len(ok)} Uploads: {lines} gesammelte Zeilen und {texts} NPC-Texte"
+    if answered:  # beim übernommenen Archiv kennt man die Antwort des Servers nicht
+        text += f", davon {sum(r.get('neu', 0) for r in answered)} neu für das Projekt"
+    failed = len(found) - len(ok)
+    return text + (f" · {failed} fehlgeschlagen" if failed else "")
+
+
+def details(entry: Entry) -> str:
+    """Alles zu einem Upload als Text; die erste Zeile ist die Überschrift."""
+    info = entry.info
+    out = [f"{KIND_LABELS.get(info.get('art'), '?')} – {entry.time.astimezone():%d.%m.%Y um %H:%M:%S}",
+           f"Version: {row(entry)[2] or '?'}"]
+    if info.get("zusammenfassung"):
+        out.append(f"Inhalt: {info['zusammenfassung']}")
+    if entry.failed:
+        out.append(f"Fehlgeschlagen: {info.get('fehler', '?')}")
+        out.append("Gelöscht wurde dabei nichts; die Daten gingen beim nächsten Upload erneut mit.")
+    else:
+        out.append(f"Ergebnis: {result_text(info)}")
+    if info.get("zu_lang"):
+        out.append(f"{info['zu_lang']} Texte waren länger als der Server annimmt; sie stehen unten "
+                   "unter „Nicht gesendet“.")
+    if info.get("hinweis"):
+        out.append(info["hinweis"])
+    payload = entry.payload()
+    if payload:
+        out += ["", "Gesendet:"]
+        out += _envelope_lines(payload) if info.get("art") == "zeilen" else _text_lines(payload)
+    return "\n".join(out)
+
+
+def _envelope_lines(payload: dict) -> list[str]:
+    lines = []
+    for envelope in (payload.get("gesendet") or {}).get("envelopes", []):
+        fields = parse_envelope(envelope)
+        npc = re.sub(r"^\d+\s+", "", fields.get("npc", ""))  # "276 Viktori …" → "Viktori …"
+        meta = " · ".join(x for x in (SOURCE_NAMES.get(fields["source"], fields["source"]),
+                                      EVENT_NAMES.get(fields.get("event"), fields.get("event")), npc) if x)
+        lines.append(f"\n• {fields.get('title') or fields.get('book') or '(ohne Titel)'}   ({meta})")
+        text = fields.get("text") or max((v for v in fields.values() if "\n" in v), key=len, default="")
+        text = re.sub(r"<[^>]*>", "", text)  # Bücher sind als HTML gespeichert
+        lines += ["    " + line.strip() for line in text.splitlines() if line.strip()]
+    return lines
+
+
+def _text_lines(payload: dict) -> list[str]:
+    def show(text: str) -> str:
+        return text.replace("\n", "\n        ")
+
+    lines = []
+    for request in payload.get("gesendet") or []:
+        texts = request.get("texts", [])
+        lines.append(f"\nSprache {request.get('lang')}, Build {request.get('build')} – {len(texts)} Texte:")
+        for t in texts:
+            male, female = t.get("text", ""), t.get("text1", "")
+            lines.append(f"#{t.get('id')}  {show(male or female)}")
+            if male and female and female != male:
+                lines.append(f"        weiblich: {show(female)}")
+    skipped = payload.get("nicht_gesendet") or []
+    if skipped:
+        lines.append(f"\nNicht gesendet (zu lang für den Server) – {len(skipped)} Texte:")
+        lines += [f"#{t.get('id')}  {show(t.get('text') or t.get('text1', ''))}" for t in skipped]
+    return lines
