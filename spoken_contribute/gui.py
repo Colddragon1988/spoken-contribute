@@ -1,9 +1,9 @@
 """Das Fenster: WoW-Ordner, Konto bei spoken.rusty.one, automatischer Upload, Design, Ergebnis
 und der Verlauf aller Uploads mit Suche und Statistik.
 
-Netzwerk, Schlüsselbund und Dateiarbeit laufen in einem Hintergrund-Thread, damit das Fenster
-nicht einfriert; Ergebnisse kommen über eine Warteschlange zurück in den Fenster-Thread
-(tkinter verlangt, dass nur er die Widgets anfasst)."""
+Netzwerk, Schlüsselbund, Dateiarbeit und die Suche im Verlauf laufen in Hintergrund-Threads,
+damit das Fenster nicht einfriert. Ihre Ergebnisse kommen über eine Warteschlange zurück in den
+Fenster-Thread: tkinter verlangt, dass nur er die Widgets anfasst."""
 from __future__ import annotations
 
 import queue
@@ -25,6 +25,7 @@ THEME_CHECK_MS = 10_000  # so oft wird bei „Wie System“ nachgesehen, ob das 
 
 
 def run_window() -> int:
+    """Das Fenster öffnen und laufen lassen, bis es geschlossen wird."""
     if system.WINDOWS:
         try:  # scharfe Schrift auf hochauflösenden Bildschirmen
             import ctypes
@@ -79,7 +80,17 @@ def wrapping_label(parent: tk.Misc, **options) -> ttk.Label:
     return label
 
 
+def open_folder(path: Path, parent: tk.Misc):
+    """Ordner im Dateimanager öffnen; fehlt dafür ein Programm (z. B. xdg-open), das sagen."""
+    try:
+        system.open_path(path)
+    except OSError as err:
+        messagebox.showerror(TITLE, f"Der Ordner ließ sich nicht öffnen ({err}):\n\n{path}", parent=parent)
+
+
 class App:
+    """Das Hauptfenster."""
+
     def __init__(self, root: tk.Tk):
         self.root = root
         self.settings = settings.load()
@@ -185,19 +196,29 @@ class App:
     def change_theme(self):
         labels = {label: key for key, label in settings.THEMES.items()}
         self.settings.theme = labels[self.theme_var.get()]
-        settings.save(self.settings)
-        self.background(lambda: theme.choose(self.settings.theme), self.theme_chosen)
+        self.save_settings()
+        self.look_up_theme()
 
     def check_system_theme(self):
-        """Bei „Wie System“ einem Umschalten des Systems folgen (im Hintergrund nachgesehen)."""
+        """Bei „Wie System“ einem Umschalten des Systems folgen."""
         if self.settings.theme == "system":
-            self.background(lambda: theme.choose("system"), self.theme_chosen)
+            self.look_up_theme()
         self.root.after(THEME_CHECK_MS, self.check_system_theme)
 
-    def theme_chosen(self, palette: theme.Palette | None, error):
-        if palette and palette != self.palette:
-            self.palette = palette
-            self.apply_theme()
+    def look_up_theme(self):
+        """Die Farben zur Einstellung im Hintergrund bestimmen – bei „Wie System“ fragt das ein
+        Hilfsprogramm, das bis zu einigen Sekunden brauchen kann."""
+        setting = self.settings.theme
+        self.background(lambda: theme.choose(setting),
+                        lambda palette, _error: self.theme_chosen(setting, palette))
+
+    def theme_chosen(self, setting: str, palette: theme.Palette | None):
+        # Eine Antwort zu einer inzwischen geänderten Einstellung verfällt: sonst könnte eine
+        # langsame Systemabfrage das gerade gewählte „Dunkel“ wieder auf hell stellen.
+        if setting != self.settings.theme or palette is None or palette == self.palette:
+            return
+        self.palette = palette
+        self.apply_theme()
 
     # ------------------------------------------------------------ Hintergrundarbeit
 
@@ -225,12 +246,21 @@ class App:
         self.root.after(50, self.poll)
 
     def show_crash(self, kind, error, trace):
+        """Ein Programmfehler im Fenster-Thread: anzeigen statt still im Terminal verschwinden."""
         traceback.print_exception(kind, error, trace)
         messagebox.showerror(TITLE, f"Unerwarteter Fehler:\n\n{error!r}", parent=self.root)
+
+    def save_settings(self):
+        try:
+            settings.save(self.settings)
+        except OSError as err:
+            messagebox.showerror(TITLE, f"Die Einstellungen ließen sich nicht speichern ({err}). "
+                                 "Sie gelten nur bis zum Schließen.", parent=self.root)
 
     # ------------------------------------------------------------ WoW-Ordner
 
     def wow_path(self) -> Path:
+        """Der Ordner, der gerade im Eingabefeld steht."""
         return Path(self.wow_var.get().strip()).expanduser()
 
     def set_wow(self, text: str):
@@ -238,7 +268,7 @@ class App:
         path = system.wow_root(chosen) or chosen
         self.wow_var.set(str(path))
         self.settings.wow_dir = str(path)
-        settings.save(self.settings)
+        self.save_settings()
         self.refresh_wow()
 
     def choose_wow(self):
@@ -250,9 +280,12 @@ class App:
 
     def search_wow(self):
         self.show_wow_status("Suche …")
-        self.background(system.find_wow, self.found_wow)
+        before = self.wow_var.get()
+        self.background(system.find_wow, lambda found, _error: self.found_wow(before, found))
 
-    def found_wow(self, found: Path | None, error):
+    def found_wow(self, before: str, found: Path | None):
+        if self.wow_var.get() != before:
+            return  # während der Suche wurde schon ein Ordner gewählt; der gilt
         if found:
             self.set_wow(str(found))
         else:
@@ -329,11 +362,22 @@ class App:
         if messagebox.askyesno("Abmelden", "Die Anmeldung von diesem Rechner löschen (auch aus dem "
                                "Schlüsselbund)?\n\nOhne Anmeldung bleiben die NPC-Texte im Spiel-Cache "
                                "liegen, bis du dich wieder anmeldest.", parent=self.root):
-            self.background(settings.delete_login, lambda _result, _error: self.refresh_account())
+            # im Hintergrund: der Schlüsselbund kann nach dem Entsperren fragen
+            self.background(settings.delete_login, self.signed_out)
+
+    def signed_out(self, removed: bool | None, error):
+        self.refresh_account()
+        if error:
+            messagebox.showerror("Abmelden", f"Abmelden ist fehlgeschlagen ({error}).", parent=self.root)
+        elif not removed:
+            messagebox.showwarning("Abmelden", "Abgemeldet – aber der Schlüsselbund war gesperrt oder "
+                                   "nicht erreichbar, das Passwort steht womöglich noch darin (Eintrag "
+                                   f"„{settings.KEYRING_SERVICE}“). Es lässt sich dort von Hand "
+                                   "löschen.", parent=self.root)
 
     def save_auto(self):
         self.settings.auto_upload = self.auto_var.get()
-        settings.save(self.settings)
+        self.save_settings()
 
     # ------------------------------------------------------------ Upload
 
@@ -353,6 +397,7 @@ class App:
         self.background(work, self.upload_done)
 
     def upload_done(self, report: upload.Report | None, error):
+        """Das Ergebnis anzeigen und Übersicht und Verlauf auffrischen."""
         self.set_busy(False)
         if error:
             report = upload.Report("Unerwarteter Fehler.", [f"{error!r}", "Was nicht hochgeladen wurde, "
@@ -401,14 +446,13 @@ class LoginDialog(tk.Toplevel):
         self.title("Bei spoken.rusty.one anmelden")
         self.transient(app.root)
         self.resizable(False, False)
-        self.configure(background=app.palette.background)
-        theme.dark_title_bar(self, app.palette.dark)
 
         body = ttk.Frame(self, padding=PAD * 1.5)
         body.pack(fill="both", expand=True)
         ttk.Label(body, wraplength=360, justify="left",
                   text="Die Anmeldung bleibt auf diesem Rechner: das Passwort im Schlüsselbund des "
-                       "Systems, die E-Mail-Adresse in den Einstellungen.").grid(
+                       "Systems (ohne Schlüsselbund in einer Datei, die nur du lesen kannst), die "
+                       "E-Mail-Adresse in den Einstellungen.").grid(
             row=0, column=0, columnspan=2, sticky="w", pady=(0, PAD))
         ttk.Label(body, text="E-Mail").grid(row=1, column=0, sticky="w", padx=(0, 8))
         self.email = ttk.Entry(body, width=36)
@@ -435,6 +479,7 @@ class LoginDialog(tk.Toplevel):
 
         self.bind("<Return>", lambda _e: self.submit())
         self.bind("<Escape>", lambda _e: self.destroy())
+        theme.paint(self, app.palette)
         place_over(self, app.root)
         self.email.focus_set()
         try:
@@ -460,9 +505,9 @@ class LoginDialog(tk.Toplevel):
         self.app.background(work, lambda _result, error: self.done(error))
 
     def done(self, error):
-        if not self.winfo_exists():
+        if not self.winfo_exists():  # inzwischen geschlossen; gespeichert ist trotzdem
             self.app.refresh_account()
-            return  # inzwischen geschlossen
+            return
         if error:
             text = str(error) if isinstance(error, UploadError) else f"Unerwarteter Fehler: {error!r}"
             self.message.configure(text=text, style="Error.TLabel")
@@ -482,20 +527,21 @@ class HistoryWindow(tk.Toplevel):
     ALL = "Alle"
     KINDS = {ALL: None, "Gesammelte Zeilen": "zeilen", "NPC-Texte": "npc-texte", "Fehlgeschlagen": "fehler"}
     CHART_DAYS = 30
+    MAX_HIGHLIGHTS = 1000  # mehr Treffer markieren dauert spürbar und hilft niemandem
 
     def __init__(self, app: App):
         super().__init__(app.root)
         self.app = app
         self.entries: list[history.Entry] = []  # alle
         self.shown: list[history.Entry] = []  # nach Suche und Filtern
-        self.search_cache: dict[Path, str] = {}
-        self.search_job = None
+        self.days: list[tuple] = []  # das Diagramm zu self.shown
+        self.search_index = SearchIndex()
+        self.search_job = None  # die verzögerte Suche beim Tippen
+        self.search_round = 0  # zählt jede Suche hoch; eine überholte bricht ab
         self.title("Spoken – Verlauf der Uploads")
         self.geometry("900x640")
         self.minsize(640, 440)
         self.protocol("WM_DELETE_WINDOW", self.close)
-        self.configure(background=app.palette.background)
-        theme.dark_title_bar(self, app.palette.dark)
 
         body = ttk.Frame(self, padding=PAD)
         body.pack(fill="both", expand=True)
@@ -515,30 +561,32 @@ class HistoryWindow(tk.Toplevel):
         ttk.Button(bar, text="Archiv öffnen", command=self.open_archive).pack(side="left", padx=(6, 0))
         ttk.Button(bar, text="Schließen", command=self.close).pack(side="right")
         self.bind("<Escape>", lambda _e: self.close())
-        theme.apply(app.root, app.palette)  # die neuen Textfelder und die Zeichenfläche einfärben
+        theme.paint(self, app.palette)  # die neuen Textfelder, die Zeichenfläche und Klapplisten
         self.restyle()
         self.reload()
 
     # ------------------------------------------------------------ Aufbau
 
     def build_filters(self, parent: tk.Misc):
+        # Ohne tk.StringVar: Das Fenster hängt mit seinen Widgets in einem Referenzkreis und wird
+        # nach dem Schließen von der Speicherbereinigung abgeräumt – womöglich gerade in einem
+        # Hintergrund-Thread, und eine StringVar ruft beim Abräumen Tk auf. Die Widgets kennen
+        # ihren Inhalt selbst.
         bar = ttk.Frame(parent)
         bar.grid(row=0, column=0, sticky="ew")
         bar.columnconfigure(1, weight=1)
         ttk.Label(bar, text="Suchen:").grid(row=0, column=0, padx=(0, 6))
-        self.search_var = tk.StringVar()
-        search = ttk.Entry(bar, textvariable=self.search_var)
-        search.grid(row=0, column=1, sticky="ew")
-        search.bind("<KeyRelease>", lambda _e: self.schedule_filter())
+        self.search = ttk.Entry(bar)
+        self.search.grid(row=0, column=1, sticky="ew")
+        self.search.bind("<KeyRelease>", lambda _e: self.schedule_filter())
         ttk.Label(bar, text="Art:").grid(row=0, column=2, padx=(PAD, 6))
-        self.kind_var = tk.StringVar(value=self.ALL)
-        kinds = ttk.Combobox(bar, textvariable=self.kind_var, values=list(self.KINDS), state="readonly",
-                             width=17)
-        kinds.grid(row=0, column=3)
-        kinds.bind("<<ComboboxSelected>>", lambda _e: self.apply_filter())
+        self.kinds = ttk.Combobox(bar, values=list(self.KINDS), state="readonly", width=17)
+        self.kinds.set(self.ALL)
+        self.kinds.grid(row=0, column=3)
+        self.kinds.bind("<<ComboboxSelected>>", lambda _e: self.apply_filter())
         ttk.Label(bar, text="Version:").grid(row=0, column=4, padx=(PAD, 6))
-        self.version_var = tk.StringVar(value=self.ALL)
-        self.versions = ttk.Combobox(bar, textvariable=self.version_var, state="readonly", width=14)
+        self.versions = ttk.Combobox(bar, state="readonly", width=14)
+        self.versions.set(self.ALL)
         self.versions.grid(row=0, column=5)
         self.versions.bind("<<ComboboxSelected>>", lambda _e: self.apply_filter())
         self.summary = wrapping_label(bar, style="Muted.TLabel")
@@ -563,7 +611,7 @@ class HistoryWindow(tk.Toplevel):
         self.tree.configure(yscrollcommand=scroll.set)
         self.tree.grid(row=0, column=0, sticky="nsew")
         scroll.grid(row=0, column=1, sticky="ns")
-        self.detail = text_box(panes)
+        self.detail = text_box(panes, height=8)  # klein anfordern; den Rest verteilt `weight`
         self.detail.tag_configure("head", font=self.app.bold)
         panes.add(table, weight=1)
         panes.add(self.detail.frame, weight=2)
@@ -591,12 +639,13 @@ class HistoryWindow(tk.Toplevel):
     # ------------------------------------------------------------ Daten und Filter
 
     def reload(self):
+        """Den Verlauf neu einlesen (eintrag.json je Upload). Der Suchindex bleibt: ein Eintrag
+        ändert sich nach dem Schreiben nicht mehr."""
         self.entries = history.entries()
-        self.search_cache.clear()
         versions = sorted({v for e in self.entries for v in e.info.get("versionen", [])})
         self.versions.configure(values=[self.ALL, *versions])
-        if self.version_var.get() not in (self.ALL, *versions):
-            self.version_var.set(self.ALL)
+        if self.versions.get() not in (self.ALL, *versions):
+            self.versions.set(self.ALL)
         self.apply_filter()
 
     def schedule_filter(self):
@@ -605,39 +654,68 @@ class HistoryWindow(tk.Toplevel):
             self.after_cancel(self.search_job)
         self.search_job = self.after(250, self.apply_filter)
 
-    def matches(self, entry: history.Entry) -> bool:
-        kind = self.KINDS[self.kind_var.get()]
+    def query(self) -> str:
+        return self.search.get().strip()
+
+    def passes_filters(self, entry: history.Entry) -> bool:
+        """Art und Version – das steht in eintrag.json und geht sofort."""
+        kind = self.KINDS[self.kinds.get()]
         if kind == "fehler" and not entry.failed:
             return False
         if kind not in (None, "fehler") and (entry.info.get("art") != kind or entry.failed):
             return False
-        version = self.version_var.get()
-        if version != self.ALL and version not in entry.info.get("versionen", []):
-            return False
-        query = self.search_var.get().strip().casefold()
-        if not query:
-            return True
-        if entry.folder not in self.search_cache:
-            self.search_cache[entry.folder] = history.search_text(entry)
-        return query in self.search_cache[entry.folder]
+        version = self.versions.get()
+        return version == self.ALL or version in entry.info.get("versionen", [])
 
     def apply_filter(self):
+        """Filter sofort anwenden. Die Suche muss das Gesendete jedes Uploads lesen – bei vielen
+        oder großen Uploads mehrere Sekunden – und läuft deshalb im Hintergrund."""
         self.search_job = None
-        self.shown = [e for e in self.entries if self.matches(e)]
+        self.search_round += 1
+        candidates = [e for e in self.entries if self.passes_filters(e)]
+        query = self.query().casefold()
+        if not query:
+            self.show_entries(candidates)
+            return
+        self.summary.configure(text="Suche …")
+        search_round = self.search_round
+
+        def search() -> list[history.Entry] | None:  # im Hintergrund-Thread
+            found = []
+            for entry in candidates:
+                if search_round != self.search_round:
+                    return None  # inzwischen weitergetippt oder Fenster geschlossen
+                if query in self.search_index.text(entry):
+                    found.append(entry)
+            return found
+
+        self.app.background(search, lambda found, error: self.search_done(search_round, found, error))
+
+    def search_done(self, search_round: int, found: list[history.Entry] | None, error):
+        if search_round != self.search_round:
+            return  # überholt
+        if error:
+            self.summary.configure(text=f"Suche fehlgeschlagen: {error}")
+            return
+        self.show_entries(found)
+
+    def show_entries(self, shown: list[history.Entry]):
+        """Tabelle, Summenzeile und Statistik für die gefundenen Uploads; der erste wird gewählt."""
+        self.shown = shown
         self.tree.delete(*self.tree.get_children())
-        for i, entry in enumerate(self.shown):
+        for i, entry in enumerate(shown):
             self.tree.insert("", "end", iid=str(i), values=history.row(entry),
                              tags=("fehler",) if entry.failed else ())
         if not self.entries:
             text = "Noch keine Uploads archiviert."
-        elif not self.shown:
+        elif not shown:
             text = "Keine Uploads passen zu Suche und Filter."
         else:
-            text = history.totals(self.shown)
-            if len(self.shown) != len(self.entries):
-                text += f"   (gefiltert: {len(self.shown)} von {len(self.entries)})"
+            text = history.totals(shown)
+            if len(shown) != len(self.entries):
+                text += f"   (gefiltert: {len(shown)} von {len(self.entries)})"
         self.summary.configure(text=text)
-        if self.shown:
+        if shown:
             self.tree.selection_set("0")
             self.tree.focus("0")
         else:
@@ -650,6 +728,7 @@ class HistoryWindow(tk.Toplevel):
         return self.shown[int(chosen[0])] if chosen else None
 
     def show_selected(self):
+        """Alles zum gewählten Upload; ein einzelner ist auch mit Zehntausenden Texten schnell."""
         entry = self.selected()
         if not entry:
             return
@@ -657,25 +736,28 @@ class HistoryWindow(tk.Toplevel):
         head, _, rest = history.details(entry).partition("\n")
         set_text(self.detail, head + "\n", "head")
         set_text(self.detail, rest, append=True)
-        self.highlight(self.search_var.get().strip())
+        self.highlight(self.query())
 
     def highlight(self, query: str):
-        """Suchtreffer im Detailtext markieren und zum ersten springen."""
+        """Suchtreffer im Detailtext markieren (höchstens MAX_HIGHLIGHTS) und zum ersten springen."""
         self.detail.tag_remove("match", "1.0", "end")
-        first, start = None, "1.0"
-        while query:
-            start = self.detail.search(query, start, "end", nocase=True)
+        first, start, found = None, "1.0", 0
+        length = tk.IntVar(self)  # Länge des Treffers, wie Tk ihn zählt
+        while query and found < self.MAX_HIGHLIGHTS:
+            start = self.detail.search(query, start, "end", nocase=True, count=length)
             if not start:
                 break
-            end = f"{start}+{len(query)}c"
+            end = f"{start}+{max(length.get(), 1)}c"
             self.detail.tag_add("match", start, end)
             first = first or start
             start = end
+            found += 1
         self.detail.see(first or "1.0")
 
     # ------------------------------------------------------------ Statistik
 
     def show_statistics(self):
+        """Summen und Diagramm für die gerade gezeigten Uploads."""
         s = history.statistics(self.shown)
         head = "Statistik" + (" (gefiltert)" if len(self.shown) != len(self.entries) else "")
         lines = [f"{s.uploads} Uploads" + (f", {s.failed} fehlgeschlagen" if s.failed else "")]
@@ -689,18 +771,20 @@ class HistoryWindow(tk.Toplevel):
         set_text(self.stats_text, head + "\n", "head")
         set_text(self.stats_text, "\n".join(lines), append=True)
         self.stats_text.see("1.0")
+        self.days = history.daily(self.shown, self.CHART_DAYS)  # einmal je Filter, nicht je Neuzeichnen
         self.draw_chart()
 
     def draw_chart(self):
-        """Gestapelte Balken je Tag: gesammelte Zeilen und NPC-Texte der letzten 30 Tage."""
-        canvas, p, small = self.chart, self.app.palette, self.app.small
+        """Gestapelte Balken je Tag: gesammelte Zeilen und NPC-Texte der letzten 30 Tage.
+        Wird bei jeder Größenänderung neu gezeichnet."""
+        canvas, p, small, days = self.chart, self.app.palette, self.app.small, self.days
         canvas.delete("all")
         width, height = canvas.winfo_width(), canvas.winfo_height()
-        if width < 100 or height < 80:
+        if width < 100 or height < 80 or not days:
             return  # noch nicht sichtbar
-        days = history.daily(self.shown, self.CHART_DAYS)
-        peak = max(lines + texts for _, lines, texts in days) or 1
-        left, right, top, bottom = 44, 12, 34, height - 24
+        peak = max(lines + texts for _, lines, texts in days)
+        left = small.measure(str(peak)) + 14  # Platz für die Beschriftung der Skala
+        right, top, bottom = 12, 34, height - 24
         step = (width - left - right) / len(days)
         bar = max(step * 0.7, 1)
 
@@ -713,8 +797,10 @@ class HistoryWindow(tk.Toplevel):
             canvas.create_text(x + 14, 15, anchor="w", fill=p.text, font=small, text=label)
             x -= 16
         canvas.create_line(left, bottom, width - right, bottom, fill=p.border)
-        canvas.create_text(left - 6, top, anchor="e", fill=p.muted, font=small, text=str(peak))
         canvas.create_text(left - 6, bottom, anchor="e", fill=p.muted, font=small, text="0")
+        if not peak:
+            return  # nichts gesendet in diesen Tagen; eine Skala bis „1“ wäre irreführend
+        canvas.create_text(left - 6, top, anchor="e", fill=p.muted, font=small, text=str(peak))
         for i, (day, lines, texts) in enumerate(days):
             x, y = left + i * step + (step - bar) / 2, bottom
             for value, color in ((lines, p.chart_lines), (texts, p.chart_texts)):
@@ -731,12 +817,44 @@ class HistoryWindow(tk.Toplevel):
     def open_selected(self):
         entry = self.selected()
         if entry:
-            system.open_path(entry.folder)
+            open_folder(entry.folder, self)
 
     def open_archive(self):
-        history.ROOT.mkdir(parents=True, exist_ok=True)
-        system.open_path(history.ROOT)
+        try:
+            history.ROOT.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass  # das meldet dann open_folder
+        open_folder(history.ROOT, self)
 
     def close(self):
+        self.search_round += 1  # eine laufende Suche abbrechen
         self.app.history_window = None
         self.destroy()
+
+
+class SearchIndex:
+    """Der durchsuchbare Text je Upload (history.search_text), für die Suche im Hintergrund.
+
+    Hält höchstens LIMIT Zeichen vor: Ein Upload mit Zehntausenden NPC-Texten hat schnell
+    10 Millionen Zeichen, und bei vielen davon würde der Speicher knapp. Was nicht mehr
+    hineinpasst, wird bei jeder Suche neu gelesen. Mehrere Such-Threads können gleichzeitig
+    hineinschreiben (eine überholte Suche läuft bis zum nächsten Eintrag weiter), daher die Sperre."""
+
+    LIMIT = 30_000_000
+
+    def __init__(self):
+        self._texts: dict[Path, str] = {}
+        self._size = 0
+        self._lock = threading.Lock()
+
+    def text(self, entry: history.Entry) -> str:
+        with self._lock:
+            known = self._texts.get(entry.folder)
+        if known is not None:
+            return known
+        text = history.search_text(entry)
+        with self._lock:
+            if entry.folder not in self._texts and self._size + len(text) <= self.LIMIT:
+                self._texts[entry.folder] = text
+                self._size += len(text)
+        return text

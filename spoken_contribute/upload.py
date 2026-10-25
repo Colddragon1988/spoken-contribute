@@ -60,6 +60,7 @@ class Overview:
 
 
 def overview(wow: Path) -> Overview:
+    """Zählt, was ein Upload jetzt senden würde; liest nur, ändert nichts."""
     flavors = spoken_flavors(wow)
     running = system.running_flavors()
     # Laufende Versionen überspringt der Upload, also zählen sie hier auch nicht mit.
@@ -112,6 +113,7 @@ def originals_of(files: list[Path]) -> list[tuple[Path, str]]:
 
 
 def short_titles(titles: list[str]) -> str:
+    """Die ersten zehn Titel, der Rest nur gezählt."""
     text = ", ".join(titles[:10])
     if len(titles) > 10:
         text += f" und {len(titles) - 10} weitere"
@@ -156,13 +158,16 @@ def upload_contributions(site: Site, flavors: list[Path], credentials, test: boo
         return Outcome("Gesammelte Zeilen: keine neuen seit dem letzten Upload.")
     origin = ", ".join(f"{n} aus {name}" for name, n in batch.per_flavor.items())
     kinds, titles = summarize(batch.envelopes)
-    notes = [short_titles(titles)] if titles else []
     uploads = math.ceil(len(batch.envelopes) / MAX_ENVELOPES)
-    if uploads > 1:
-        notes.append(f"Mehr als {MAX_ENVELOPES} Zeilen in einer Datei – sie gehen in {uploads} Uploads.")
-    if batch.deferred:
-        notes.append(f"{batch.deferred} weitere passen nicht mehr in diesen Upload (höchstens "
-                     f"{MAX_ENVELOPES}) und gehen beim nächsten Mal mit.")
+    notes = batch_notes(batch, titles, uploads)
+    if uploads > limits.PER_HOUR:
+        # Eine Datei geht nur ganz oder gar nicht; so viele Uploads nimmt der Server aber in
+        # keiner Stunde an. Nicht anfangen: Die ersten Pakete gingen jede Stunde wieder raus.
+        return Outcome("\n  ".join([f"Gesammelte Zeilen: {kinds} bleiben liegen ({origin}).", *notes,
+                                    f"Das wären {uploads} Uploads, der Server nimmt aber höchstens "
+                                    f"{limits.PER_HOUR} pro Stunde an – so lässt sich die Datei nicht "
+                                    "hochladen. Sie bleibt unverändert."]),
+                       failed=True)
     free_at = limits.free_at(uploads)
     if free_at:
         notes.append(f"Upload-Grenze erreicht ({limits.PER_HOUR} pro Stunde) – wieder möglich ab "
@@ -175,14 +180,55 @@ def upload_contributions(site: Site, flavors: list[Path], credentials, test: boo
 
     log(f"Gesammelte Zeilen: sende {len(batch.envelopes)} …")
     answers = send_envelopes(site, batch.envelopes)
-    accepted = sum(_count(a.get("accepted")) for a in answers)
-    known = sum(_count(a.get("known")) for a in answers)
-    refused = sum(refused_count(a.get("refused")) for a in answers)
+    result = summed_result(answers)
+    archive_contributions(batch, kinds, titles, result, answers)
+    # Erst jetzt leeren: Server und Archiv haben alles.
+    cleared_note, clear_failed = clear_sent(batch)
+    lines = [f"Gesammelte Zeilen: {kinds} gesendet ({origin}).", result_line(result), *notes, cleared_note]
+    return Outcome("\n  ".join(lines), sent=True, failed=clear_failed)
+
+
+def summed_result(answers: list[dict]) -> dict:
+    """Die Antworten aller Uploads zusammengezählt, so wie sie im Verlauf stehen."""
+    result = {"neu": 0, "bekannt": 0, "abgelehnt": 0}
+    for answer in answers:
+        accepted, known = _count(answer.get("accepted")), _count(answer.get("known"))
+        result["neu"] += accepted - known
+        result["bekannt"] += known
+        result["abgelehnt"] += refused_count(answer.get("refused"))
+    return result
+
+
+def clear_sent(batch: Batch) -> tuple[str, bool]:
+    """Die gesendeten und archivierten Zeilen aus den Dateien entfernen: (Hinweis, fehlgeschlagen)."""
+    try:
+        kept = clear_contributions(batch.files, set(batch.envelopes))
+    except OSError as err:
+        return (f"{CONTRIBUTIONS} ließ sich nicht leeren ({err}). Die Zeilen gehen beim nächsten Mal "
+                "erneut mit; der Server erkennt sie wieder.", True)
+    if kept:
+        return (f"{len(kept)} Datei(en) haben sich während des Uploads verändert und bleiben "
+                "unberührt; sie gehen beim nächsten Mal mit.", False)
+    return f"Liste in {CONTRIBUTIONS} geleert.", False
+
+
+def batch_notes(batch: Batch, titles: list[str], uploads: int) -> list[str]:
+    """Hinweise zum Upload: welche Quests und Bücher, Aufteilung, was liegen bleibt."""
+    notes = [short_titles(titles)] if titles else []
+    if uploads > 1:
+        notes.append(f"Mehr als {MAX_ENVELOPES} Zeilen in einer Datei – sie gehen in {uploads} Uploads.")
+    if batch.deferred:
+        notes.append(f"{batch.deferred} weitere passen nicht mehr in diesen Upload (höchstens "
+                     f"{MAX_ENVELOPES}) und gehen beim nächsten Mal mit.")
+    return notes
+
+
+def archive_contributions(batch: Batch, kinds: str, titles: list[str], result: dict, answers: list[dict]):
+    """Das Gesendete samt Originaldateien archivieren. Scheitert das, wird nichts geleert."""
     try:
         history.record("zeilen",
                        {"status": "ok", "versionen": list(batch.per_flavor), "anzahl": len(batch.envelopes),
-                        "zusammenfassung": kinds, "titel": titles,
-                        "ergebnis": {"neu": accepted - known, "bekannt": known, "abgelehnt": refused}},
+                        "zusammenfassung": kinds, "titel": titles, "ergebnis": result},
                        # "antwort" bleibt wie bisher ein Objekt; nur bei mehreren Uploads eine Liste.
                        payload={"gesendet": contribution_payload(batch.envelopes),
                                 "antwort": answers[0] if len(answers) == 1 else answers},
@@ -190,26 +236,15 @@ def upload_contributions(site: Site, flavors: list[Path], credentials, test: boo
     except OSError as err:
         raise UploadError(f"Gesammelte Zeilen: gesendet, aber nicht archiviert ({err}).") from None
 
-    stats = f"{accepted - known} neu für das Projekt"
-    if known:
-        stats += f", {known} kannte es schon"
-    if refused:
-        stats += f", {refused} nicht verwendbar"
-    lines = [f"Gesammelte Zeilen: {kinds} gesendet ({origin}).", stats, *notes]
 
-    # Erst jetzt leeren: Server und Archiv haben alles.
-    try:
-        kept = clear_contributions(batch.files, set(batch.envelopes))
-    except OSError as err:
-        lines.append(f"{CONTRIBUTIONS} ließ sich nicht leeren ({err}). Die Zeilen gehen beim "
-                     "nächsten Mal erneut mit; der Server erkennt sie wieder.")
-        return Outcome("\n  ".join(lines), sent=True, failed=True)
-    if kept:
-        lines.append(f"{len(kept)} Datei(en) haben sich während des Uploads verändert und bleiben "
-                     "unberührt; sie gehen beim nächsten Mal mit.")
-    else:
-        lines.append(f"Liste in {CONTRIBUTIONS} geleert.")
-    return Outcome("\n  ".join(lines), sent=True)
+def result_line(result: dict) -> str:
+    """„12 neu für das Projekt, 3 kannte es schon, 1 nicht verwendbar“."""
+    text = f"{result['neu']} neu für das Projekt"
+    if result["bekannt"]:
+        text += f", {result['bekannt']} kannte es schon"
+    if result["abgelehnt"]:
+        text += f", {result['abgelehnt']} nicht verwendbar"
+    return text
 
 
 # ---------------------------------------------------------------- NPC-Texte
@@ -220,6 +255,7 @@ def utf16_length(text: str) -> int:
 
 
 def is_too_long(row: dict) -> bool:
+    """Ob der Server diesen Text stillschweigend verwerfen würde."""
     return utf16_length(row["text"]) > MAX_TEXT_LENGTH or utf16_length(row["text1"]) > MAX_TEXT_LENGTH
 
 
@@ -263,6 +299,7 @@ def cache_jobs(flavors: list[Path]) -> list[CacheJob]:
 
 
 def sign_in(site: Site, credentials: dict):
+    """Für die NPC-Texte anmelden; danach trägt `site` das Sitzungs-Cookie."""
     try:
         site.sign_in(credentials["email"], credentials["password"])
     except UploadError as err:

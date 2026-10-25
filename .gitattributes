@@ -1,0 +1,3 @@
+# Git soll Zeilenenden nicht nach System umwandeln: Unter Windows (core.autocrlf) bekämen die
+# Startskripte sonst CRLF, und macOS/Linux scheitern dann an „/bin/sh^M“ in der ersten Zeile.
+* text=auto eol=lf

@@ -26,6 +26,7 @@ class Settings:
 
 
 def _read_json(path) -> dict:
+    """Inhalt einer JSON-Datei; fehlt sie oder ist sie kaputt, ein leeres dict."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -55,6 +56,9 @@ def save(settings: Settings):
 
 
 # ---------------------------------------------------------------- Anmeldung
+#
+# Grundsatz: Das Passwort steht immer an mindestens einer Stelle. Aus login.json verschwindet es
+# erst, wenn es nachweislich im Schlüsselbund steht (wieder ausgelesen und verglichen).
 
 def _keyring():
     """Das Modul keyring, wenn es einen benutzbaren Schlüsselbund gibt; sonst None."""
@@ -67,58 +71,70 @@ def _keyring():
     return keyring if getattr(backend, "priority", 0) > 0 else None
 
 
+def _login() -> dict:
+    return _read_json(LOGIN)
+
+
+def _password_in_file(login: dict) -> str | None:
+    password = login.get("password")
+    return password if isinstance(password, str) and password else None
+
+
 def account() -> str | None:
     """Die E-Mail-Adresse der Anmeldung, sonst None. Öffnet den Schlüsselbund nicht."""
-    email = _read_json(LOGIN).get("email")
+    email = _login().get("email")
     return email if isinstance(email, str) and email else None
 
 
 def password_in_keyring() -> bool:
     """Ob das Passwort der aktuellen Anmeldung im Schlüsselbund steht (statt in login.json)."""
-    return account() is not None and not _read_json(LOGIN).get("password")
+    return account() is not None and _password_in_file(_login()) is None
 
 
 def credentials() -> dict | None:
     """{"email", "password"} der Anmeldung, None wenn nicht angemeldet. "password" ist None,
     wenn der Schlüsselbund es nicht herausgibt. Kann eine Entsperr-Abfrage des Schlüsselbunds
     auslösen – daher nicht im Fenster-Thread aufrufen."""
-    data = _read_json(LOGIN)
     email = account()
     if not email:
         return None
-    password = data.get("password")
-    if not (isinstance(password, str) and password):
-        password = _keyring_get(email)
+    password = _password_in_file(_login()) or _keyring_get(email)
     return {"email": email, "password": password}
 
 
 def save_login(email: str, password: str):
-    """Anmeldung speichern; das Passwort möglichst im Schlüsselbund."""
-    delete_login()  # eine frühere Anmeldung samt Schlüsselbund-Eintrag entfernen
+    """Anmeldung speichern; das Passwort möglichst im Schlüsselbund, sonst in login.json.
+    Die bisherige Anmeldung wird erst ersetzt, wenn die neue sicher steht."""
+    previous = account()
     if _keyring_set(email, password):
         _write_login(email, None)
     else:
         _write_login(email, password)
+    if previous and previous != email:
+        _keyring_delete(previous)  # das Passwort des alten Kontos nicht herumliegen lassen
 
 
 def move_password_to_keyring():
     """Ein Passwort, das noch in login.json steht (frühere Fassung oder damals kein
-    Schlüsselbund), in den Schlüsselbund umziehen – sobald es einen gibt."""
-    data = _read_json(LOGIN)
-    email, password = account(), data.get("password")
-    if email and isinstance(password, str) and password and _keyring_set(email, password):
+    Schlüsselbund), in den Schlüsselbund umziehen – sobald es einen gibt. Scheitert das
+    Schreiben von login.json (OSError), steht das Passwort eben an beiden Stellen."""
+    email, password = account(), _password_in_file(_login())
+    if email and password and _keyring_set(email, password):
         _write_login(email, None)
 
 
-def delete_login():
+def delete_login() -> bool:
+    """Abmelden: login.json und den Eintrag im Schlüsselbund löschen. False, wenn das Passwort
+    womöglich im Schlüsselbund zurückbleibt (gesperrt oder nicht erreichbar) – abgemeldet ist
+    der Nutzer trotzdem, login.json ist dann schon weg."""
     email = account()
-    ring = _keyring() if email else None
-    if ring:
-        try:
-            ring.delete_password(KEYRING_SERVICE, email)
-        except Exception:
-            pass  # gab es dort nicht
+    if not email:
+        LOGIN.unlink(missing_ok=True)
+        return True
+    in_keyring = password_in_keyring()
+    removed = _keyring_delete(email)  # auch sonst versuchen: ein Rest von früher wäre möglich
     LOGIN.unlink(missing_ok=True)
+    return removed or not in_keyring
 
 
 def _write_login(email: str, password: str | None):
@@ -146,5 +162,20 @@ def _keyring_set(email: str, password: str) -> bool:
     try:
         ring.set_password(KEYRING_SERVICE, email, password)
         return ring.get_password(KEYRING_SERVICE, email) == password
+    except Exception:
+        return False
+
+
+def _keyring_delete(email: str) -> bool:
+    """Eintrag aus dem Schlüsselbund löschen; True, wenn danach nachweislich keiner mehr da ist."""
+    ring = _keyring()
+    if not ring:
+        return False
+    try:
+        ring.delete_password(KEYRING_SERVICE, email)
+    except Exception:
+        pass  # gab es nicht – oder der Schlüsselbund ist gesperrt; das klärt die Probe
+    try:
+        return ring.get_password(KEYRING_SERVICE, email) is None
     except Exception:
         return False

@@ -21,13 +21,12 @@ def _now() -> datetime:
 
 
 def recent() -> list[datetime]:
-    """Zeitpunkte der Uploads in der letzten Stunde, die ältesten zuerst."""
-    try:
-        stamps = [datetime.fromisoformat(s) for s in json.loads(FILE.read_text(encoding="utf-8"))]
-    except (OSError, ValueError, TypeError):
-        return []
-    cutoff = _now() - WINDOW
-    return sorted(s for s in stamps if s > cutoff)
+    """Zeitpunkte der Uploads in der letzten Stunde, die ältesten zuerst, in Ortszeit.
+
+    Zeitpunkte in der Zukunft zählen nicht: Wurde die Uhr zurückgestellt, sperrten sie sonst
+    weit länger als eine Stunde. Zählt das Programm dadurch zu wenig, meldet der Server 429."""
+    now = _now()
+    return sorted(stamp for stamp in _load() if now - WINDOW < stamp <= now)
 
 
 def remaining() -> int:
@@ -36,12 +35,13 @@ def remaining() -> int:
 
 
 def free_at(needed: int = 1) -> datetime | None:
-    """Ab wann wieder `needed` Uploads gehen; None, wenn sofort."""
+    """Ab wann wieder `needed` Uploads hintereinander gehen; None, wenn sofort.
+    Mehr als PER_HOUR gehen nie auf einmal – dafür zählt, ab wann die Stunde ganz frei ist."""
     stamps = recent()
-    over = len(stamps) + needed - PER_HOUR
-    if over <= 0:
+    must_expire = len(stamps) + min(needed, PER_HOUR) - PER_HOUR
+    if must_expire <= 0:
         return None
-    return stamps[over - 1] + WINDOW
+    return stamps[must_expire - 1] + WINDOW
 
 
 def note_upload():
@@ -53,6 +53,28 @@ def note_refused():
     """Der Server hat mit 429 abgelehnt: die Stunde ab jetzt als voll betrachten."""
     stamps = recent()
     _save(stamps + [_now()] * max(PER_HOUR - len(stamps), 0))
+
+
+def _load() -> list[datetime]:
+    """Alle gespeicherten Zeitpunkte in Ortszeit. Unlesbares wird übergangen, ebenso Zeitpunkte
+    ohne Zeitzone – die schreibt das Programm nie, und vergleichen ließen sie sich nicht."""
+    try:
+        texts = json.loads(FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(texts, list):
+        return []
+    stamps = []
+    for text in texts:
+        try:
+            stamp = datetime.fromisoformat(text)
+        except (TypeError, ValueError):
+            continue
+        if stamp.tzinfo is not None:
+            # In Ortszeit umrechnen: sonst zeigte „wieder ab 15:30 Uhr“ nach einer
+            # Zeitumstellung die Uhrzeit von vorher.
+            stamps.append(stamp.astimezone())
+    return stamps
 
 
 def _save(stamps: list[datetime]):

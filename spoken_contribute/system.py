@@ -46,6 +46,10 @@ def write_file(path: Path, text: str, private: bool = False):
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600 if private else 0o666)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(text)
+        # Erst auf die Platte, dann ersetzen: sonst kann nach einem Stromausfall statt der
+        # alten Datei eine leere dastehen – bei login.json wäre das Passwort weg.
+        f.flush()
+        os.fsync(f.fileno())
     if private and not WINDOWS:
         os.chmod(tmp, 0o600)  # falls die Datei schon mit anderen Rechten existierte
     os.replace(tmp, path)
@@ -64,10 +68,16 @@ def open_path(path: Path):
 def is_wow_root(path: Path) -> bool:
     """Der WoW-Hauptordner enthält Versionsordner wie _classic_era_ oder _retail_."""
     try:
-        return any(d.is_dir() and any((d / name).exists() for name in ("WTF", "Interface", ".flavor.info"))
-                   for d in path.glob("_*_"))
+        return any(_is_flavor(folder) for folder in path.glob("_*_"))
     except OSError:
         return False
+
+
+def _is_flavor(folder: Path) -> bool:
+    """Ein Versionsordner hat WTF, Interface oder .flavor.info – das unterscheidet ihn von
+    anderen Ordnern, die zufällig mit _ beginnen und enden."""
+    markers = ("WTF", "Interface", ".flavor.info")
+    return folder.is_dir() and any((folder / marker).exists() for marker in markers)
 
 
 def wow_root(path: Path) -> Path | None:
@@ -93,6 +103,7 @@ def find_wow() -> Path | None:
 
 
 def wow_candidates() -> list[Path]:
+    """Die üblichen Installationsorte je System; ob dort wirklich WoW liegt, prüft find_wow."""
     if WINDOWS:
         drives = [f"{letter}:\\" for letter in "CDEFGHIJ" if os.path.isdir(f"{letter}:\\")]
         return _registry_wow() + [Path(drive, sub, WOW_FOLDER) for drive in drives
@@ -125,6 +136,7 @@ WINE_PREFIXES = ("Games/*", ".wine", ".local/share/wineprefixes/*",
 
 
 def _wine_prefixes() -> list[Path]:
+    """Alle Wine-Präfixe des Benutzers, ohne Doppelte; WINEPREFIX zuerst."""
     found = [Path(os.environ["WINEPREFIX"])] if os.environ.get("WINEPREFIX") else []
     for pattern in WINE_PREFIXES:
         found += sorted(Path.home().glob(pattern))
@@ -200,6 +212,7 @@ def prefers_dark() -> bool:
 
 
 def _output(command: list[str], timeout: float = 30) -> list[str]:
+    """Die nicht leeren Ausgabezeilen eines Hilfsprogramms; fehlt es oder scheitert es, keine."""
     try:
         # errors="replace": PowerShell gibt Pfade mit Umlauten in der Konsolen-Codepage aus,
         # die nicht zu Pythons Vorgabe passen muss – das darf nicht zum Absturz führen.

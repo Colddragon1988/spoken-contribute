@@ -1,6 +1,9 @@
 """Verlauf, Anmeldung und das Betriebssystem-Spezifische."""
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import os
 import unittest
 from datetime import datetime, timedelta
@@ -9,7 +12,7 @@ from unittest import mock
 
 from helpers import FakeKeyring, Sandbox, contributions_lua, envelope
 
-from spoken_contribute import history, settings, system
+from spoken_contribute import history, main, settings, system
 
 
 class History(Sandbox):
@@ -38,6 +41,17 @@ class History(Sandbox):
         self.assertEqual(days[-1][1:], (0, 1))
         self.assertEqual(days[-2][1:], (2, 0))
 
+    def test_entry_without_time_zone_or_broken_is_still_sortable(self):
+        history.record("zeilen", {"status": "ok", "anzahl": 1})
+        for name, info in (("ohne-zone", {"zeit": "2026-10-20T10:00:00", "art": "zeilen"}),
+                           ("liste", ["kein", "dict"]), ("ohne-zeit", {"art": "zeilen"})):
+            folder = history.ROOT / name
+            folder.mkdir()
+            (folder / history.INFO).write_text(json.dumps(info), encoding="utf-8")
+        found = history.entries()
+        self.assertEqual(len(found), 2)
+        self.assertEqual(found[-1].folder.name, "ohne-zone")
+
     def test_old_archive_is_migrated(self):
         old = system.data_dir() / "2026-10-24_17-23-10_classic_era_ACC_SpokenContributions.lua"
         old.parent.mkdir(parents=True)
@@ -46,6 +60,18 @@ class History(Sandbox):
         [entry] = history.entries()
         self.assertEqual(entry.payload()["gesendet"]["envelopes"], [envelope(1)])
         self.assertFalse(old.exists())
+
+
+    def test_old_archive_with_impossible_time_stays_put(self):
+        good = system.data_dir() / "2026-10-24_17-23-10_ACC_SpokenContributions.lua"
+        bad = system.data_dir() / "2026-13-45_17-23-10_ACC_SpokenContributions.lua"
+        good.parent.mkdir(parents=True)
+        for path in (good, bad):
+            path.write_bytes(contributions_lua([envelope(1)]))
+        history.migrate_old_archive()
+        self.assertEqual(len(history.entries()), 1)
+        self.assertFalse(good.exists())
+        self.assertTrue(bad.exists())
 
 
 class Login(Sandbox):
@@ -63,7 +89,7 @@ class Login(Sandbox):
             self.assertNotIn("geheim", settings.LOGIN.read_text(encoding="utf-8"))
             self.assertTrue(settings.password_in_keyring())
             self.assertEqual(settings.credentials()["password"], "geheim")
-            settings.delete_login()
+            self.assertTrue(settings.delete_login())
             self.assertEqual(ring.store, {})
             self.assertIsNone(settings.credentials())
 
@@ -76,12 +102,80 @@ class Login(Sandbox):
             self.assertNotIn("geheim", settings.LOGIN.read_text(encoding="utf-8"))
             self.assertEqual(settings.credentials()["password"], "geheim")
 
+    def test_password_stays_in_file_while_keyring_is_locked(self):
+        settings.save_login("a@b.c", "geheim")  # ohne Schlüsselbund: in der Datei
+        ring = FakeKeyring()
+        ring.locked = True
+        with mock.patch.object(settings, "_keyring", lambda: ring):
+            settings.move_password_to_keyring()
+        self.assertEqual(settings.credentials()["password"], "geheim")
+
+    def test_password_stays_in_file_when_keyring_loses_it(self):
+        settings.save_login("a@b.c", "geheim")
+        ring = FakeKeyring()
+        ring.set_password = lambda *_args: None  # meldet Erfolg, speichert aber nichts
+        with mock.patch.object(settings, "_keyring", lambda: ring):
+            settings.move_password_to_keyring()
+        self.assertEqual(settings.credentials()["password"], "geheim")
+
+    def test_password_survives_when_login_file_cannot_be_rewritten(self):
+        settings.save_login("a@b.c", "geheim")
+        ring = FakeKeyring()
+        with mock.patch.object(settings, "_keyring", lambda: ring), \
+                mock.patch.object(system, "write_file", side_effect=OSError("schreibgeschützt")):
+            with self.assertRaises(OSError):
+                settings.move_password_to_keyring()
+        self.assertIn("geheim", settings.LOGIN.read_text(encoding="utf-8"))
+
+    def test_logout_with_locked_keyring_reports_the_leftover(self):
+        ring = FakeKeyring()
+        with mock.patch.object(settings, "_keyring", lambda: ring):
+            settings.save_login("a@b.c", "geheim")
+            ring.locked = True
+            self.assertFalse(settings.delete_login())
+        self.assertIsNone(settings.account())  # abgemeldet ist man trotzdem
+
+    def test_logout_without_keyring_entry_is_clean(self):
+        settings.save_login("a@b.c", "geheim")  # Passwort in der Datei
+        self.assertTrue(settings.delete_login())
+        self.assertFalse(settings.LOGIN.exists())
+
+    def test_new_account_replaces_the_old_keyring_entry(self):
+        ring = FakeKeyring()
+        with mock.patch.object(settings, "_keyring", lambda: ring):
+            settings.save_login("alt@b.c", "eins")
+            settings.save_login("neu@b.c", "zwei")
+            self.assertEqual(list(ring.store), [(settings.KEYRING_SERVICE, "neu@b.c")])
+            self.assertEqual(settings.credentials(), {"email": "neu@b.c", "password": "zwei"})
+
     def test_locked_keyring_gives_no_password(self):
         ring = FakeKeyring()
         with mock.patch.object(settings, "_keyring", lambda: ring):
             settings.save_login("a@b.c", "geheim")
             ring.store.clear()
             self.assertEqual(settings.credentials(), {"email": "a@b.c", "password": None})
+
+
+class CommandLine(Sandbox):
+    def run_main(self, *args: str) -> int:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            return main.main(list(args))
+
+    def test_test_run_changes_nothing(self):
+        """--test verspricht, nichts zu verändern: auch kein Archiv-Umzug und kein Passwort-Umzug."""
+        old = system.data_dir() / "2026-10-24_17-23-10_ACC_SpokenContributions.lua"
+        old.parent.mkdir(parents=True)
+        old.write_bytes(contributions_lua([envelope(1)]))
+        settings.save_login("a@b.c", "geheim")
+        ring = FakeKeyring()
+        with mock.patch.object(settings, "_keyring", lambda: ring):
+            self.assertEqual(self.run_main("--test"), 1)  # kein WoW-Ordner eingetragen
+        self.assertTrue(old.exists())
+        self.assertEqual(ring.store, {})
+
+    def test_unknown_argument(self):
+        self.assertEqual(self.run_main("--gibts-nicht"), 2)
+        self.assertEqual(self.run_main("--help"), 0)
 
 
 class RunningGame(unittest.TestCase):

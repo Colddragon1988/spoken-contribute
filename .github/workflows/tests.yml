@@ -21,7 +21,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      # compileall übergeht Dateien, die nicht auf .py enden; den Startpunkt prüft py_compile.
       - name: Alle Module übersetzen
-        run: python -m compileall -q spoken_contribute Spoken-Upload.pyw
+        run: |
+          python -m compileall -q spoken_contribute tests
+          python -m py_compile Spoken-Upload.pyw
+      # Unter Linux gibt es keinen Bildschirm; Xvfb täuscht einen vor, damit auch die
+      # Fenster-Tests laufen. Windows und macOS haben einen.
       - name: Tests
-        run: python -m unittest discover -s tests -v
+        run: ${{ runner.os == 'Linux' && 'xvfb-run -a ' || '' }}python -m unittest discover -s tests -v

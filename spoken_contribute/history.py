@@ -32,11 +32,13 @@ EVENT_NAMES = {"detail": "Annahme", "progress": "Fortschritt", "complete": "Absc
 @dataclass
 class Entry:
     folder: Path
-    info: dict
+    info: dict  # der Inhalt von eintrag.json
 
     @property
     def time(self) -> datetime:
-        return datetime.fromisoformat(self.info["zeit"])
+        """Zeitpunkt in Ortszeit. Ein Zeitpunkt ohne Zeitzone (etwa von Hand eingetragen) gilt
+        als Ortszeit – sonst ließe er sich nicht mit den übrigen vergleichen und sortieren."""
+        return datetime.fromisoformat(self.info["zeit"]).astimezone()
 
     @property
     def failed(self) -> bool:
@@ -71,6 +73,7 @@ def record(kind: str, info: dict, payload: dict | None = None,
 
 
 def _new_folder(when: datetime, kind: str) -> Path:
+    """Ein neuer, leerer Ordner je Eintrag; zwei Uploads in derselben Sekunde bekommen -2 usw."""
     stamp = when.strftime("%Y-%m-%d_%H-%M-%S")
     for n in itertools.count(1):
         folder = ROOT / (f"{stamp}_{kind}" if n == 1 else f"{stamp}_{kind}-{n}")
@@ -86,33 +89,41 @@ OLD_BACKUP = re.compile(r"(\d{4}-\d\d-\d\d_\d\d-\d\d-\d\d)_(.+)_(SpokenContribut
 
 
 def migrate_old_archive():
-    """Übernimmt die losen Sicherungen des früheren Skripts aus dem Datenordner in den Verlauf."""
+    """Übernimmt die losen Sicherungen des früheren Skripts aus dem Datenordner in den Verlauf:
+    je Zeitpunkt ein Eintrag. Die alten Dateien werden erst gelöscht, wenn ihr Eintrag steht."""
     groups: dict[str, list[tuple[Path, re.Match]]] = {}
     for path in system.data_dir().glob("*_SpokenContributions.lua*"):
         match = OLD_BACKUP.fullmatch(path.name)
         if match:
             groups.setdefault(match.group(1), []).append((path, match))
     for stamp, files in sorted(groups.items()):
-        envelopes, originals, versions = [], [], []
-        for path, match in sorted(files):
-            flavor, _, account = match.group(2).rpartition("_")
-            flavor = flavor or "classic_era"  # die erste Fassung kannte nur Classic Era
-            name = FLAVOR_NAMES.get(f"_{flavor}_", flavor)
-            if name not in versions:
-                versions.append(name)
-            envelopes += envelopes_in(path)
-            originals.append((path, f"{flavor}/{account}/{match.group(3)}"))
-        envelopes = list(dict.fromkeys(envelopes))
-        kinds, titles = summarize(envelopes)
-        record("zeilen",
-               {"status": "ok", "versionen": versions, "anzahl": len(envelopes),
-                "zusammenfassung": kinds, "titel": titles,
-                "hinweis": "Aus dem Archiv des früheren Skripts übernommen; die Antwort des Servers "
-                           "wurde damals nicht gespeichert."},
-               payload={"gesendet": {"envelopes": envelopes}}, originals=originals,
-               when=datetime.strptime(stamp, "%Y-%m-%d_%H-%M-%S").astimezone())
+        try:
+            when = datetime.strptime(stamp, "%Y-%m-%d_%H-%M-%S").astimezone()
+        except ValueError:
+            continue  # unmöglicher Zeitpunkt im Namen: die Dateien bleiben einfach liegen
+        _migrate_group(when, sorted(files))
         for path, _ in files:
             path.unlink()
+
+
+def _migrate_group(when: datetime, files: list[tuple[Path, re.Match]]):
+    envelopes, originals, versions = [], [], []
+    for path, match in files:
+        flavor, _, account = match.group(2).rpartition("_")
+        flavor = flavor or "classic_era"  # die erste Fassung kannte nur Classic Era
+        name = FLAVOR_NAMES.get(f"_{flavor}_", flavor)
+        if name not in versions:
+            versions.append(name)
+        envelopes += envelopes_in(path)
+        originals.append((path, f"{flavor}/{account}/{match.group(3)}"))
+    envelopes = list(dict.fromkeys(envelopes))
+    kinds, titles = summarize(envelopes)
+    record("zeilen",
+           {"status": "ok", "versionen": versions, "anzahl": len(envelopes),
+            "zusammenfassung": kinds, "titel": titles,
+            "hinweis": "Aus dem Archiv des früheren Skripts übernommen; die Antwort des Servers "
+                       "wurde damals nicht gespeichert."},
+           payload={"gesendet": {"envelopes": envelopes}}, originals=originals, when=when)
 
 
 # ---------------------------------------------------------------- lesen und anzeigen
@@ -122,11 +133,12 @@ def entries() -> list[Entry]:
     found = []
     for path in ROOT.glob(f"*/{INFO}"):
         try:
-            entry = Entry(path.parent, json.loads(path.read_text(encoding="utf-8")))
-            entry.time  # prüft, ob der Zeitpunkt lesbar ist
-        except (OSError, ValueError, KeyError, TypeError, AttributeError):
-            continue
-        found.append(entry)
+            info = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(info, dict):
+                datetime.fromisoformat(info["zeit"])  # ohne lesbaren Zeitpunkt kein Eintrag
+                found.append(Entry(path.parent, info))
+        except (OSError, ValueError, KeyError, TypeError):
+            continue  # beschädigt; der Ordner bleibt unberührt
     return sorted(found, key=lambda e: e.time, reverse=True)
 
 
@@ -151,7 +163,7 @@ def row(entry: Entry) -> tuple:
     version = ", ".join(info.get("versionen", []))
     if info.get("sprache"):
         version += f" ({info['sprache']})"
-    return (entry.time.astimezone().strftime("%d.%m.%Y  %H:%M"), KIND_LABELS.get(info.get("art"), "?"),
+    return (entry.time.strftime("%d.%m.%Y  %H:%M"), KIND_LABELS.get(info.get("art"), "?"),
             version, info.get("anzahl", ""), result_text(info))
 
 
@@ -171,7 +183,7 @@ def totals(found: list[Entry]) -> str:
 def details(entry: Entry) -> str:
     """Alles zu einem Upload als Text; die erste Zeile ist die Überschrift."""
     info = entry.info
-    out = [f"{KIND_LABELS.get(info.get('art'), '?')} – {entry.time.astimezone():%d.%m.%Y um %H:%M:%S}",
+    out = [f"{KIND_LABELS.get(info.get('art'), '?')} – {entry.time:%d.%m.%Y um %H:%M:%S}",
            f"Version: {row(entry)[2] or '?'}"]
     if info.get("zusammenfassung"):
         out.append(f"Inhalt: {info['zusammenfassung']}")
@@ -193,6 +205,7 @@ def details(entry: Entry) -> str:
 
 
 def _envelope_lines(payload: dict) -> list[str]:
+    """Je Umschlag: Titel, Art, Ereignis und NPC, darunter der Text."""
     lines = []
     for envelope in (payload.get("gesendet") or {}).get("envelopes", []):
         fields = parse_envelope(envelope)
@@ -207,6 +220,7 @@ def _envelope_lines(payload: dict) -> list[str]:
 
 
 def _text_lines(payload: dict) -> list[str]:
+    """Je Paket Sprache und Build, darunter die Texte; am Ende die zu langen."""
     def show(text: str) -> str:
         return text.replace("\n", "\n        ")
 
@@ -229,7 +243,8 @@ def _text_lines(payload: dict) -> list[str]:
 # ---------------------------------------------------------------- Suche und Statistik
 
 def search_text(entry: Entry) -> str:
-    """Alles zu einem Upload in Kleinbuchstaben, zum Durchsuchen (Titel, Texte, Fehler …)."""
+    """Alles zu einem Upload in Kleinbuchstaben, zum Durchsuchen (Titel, Texte, Fehler …).
+    Liest dafür das Gesendete – bei vielen NPC-Texten einige MB, also nicht im Fenster-Thread."""
     return details(entry).casefold()
 
 
@@ -249,6 +264,7 @@ class Statistics:
 
 
 def statistics(found: list[Entry]) -> Statistics:
+    """Summen über die Einträge; braucht nur eintrag.json, nicht das Gesendete."""
     stats = Statistics()
     for entry in found:
         if entry.failed:
@@ -278,7 +294,7 @@ def daily(found: list[Entry], days: int = 30) -> list[tuple[date, int, int]]:
     today = datetime.now().astimezone().date()
     totals = {today - timedelta(days=n): [0, 0] for n in range(days)}
     for entry in found:
-        day = entry.time.astimezone().date()
+        day = entry.time.date()
         if entry.failed or day not in totals:
             continue
         totals[day][0 if entry.info.get("art") == "zeilen" else 1] += entry.info.get("anzahl", 0)

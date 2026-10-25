@@ -56,20 +56,29 @@ def dbcache(build: int, rows: list[tuple[int, str, str]], status: int = 1, table
 
 
 class FakeKeyring:
-    """Ersatz für das Modul keyring."""
+    """Ersatz für das Modul keyring. locked: jeder Zugriff scheitert, wie bei einem gesperrten
+    Schlüsselbund, dessen Entsperr-Abfrage abgelehnt wurde."""
     priority = 1
 
     def __init__(self):
         self.store = {}
+        self.locked = False
+
+    def _check(self):
+        if self.locked:
+            raise RuntimeError("Schlüsselbund gesperrt")
 
     def get_password(self, service, user):
+        self._check()
         return self.store.get((service, user))
 
     def set_password(self, service, user, password):
+        self._check()
         self.store[(service, user)] = password
 
     def delete_password(self, service, user):
-        self.store.pop((service, user))
+        self._check()
+        self.store.pop((service, user))  # KeyError wie keyring.errors.PasswordDeleteError
 
 
 class FakeServer:
@@ -116,6 +125,7 @@ class Sandbox(unittest.TestCase):
                       mock.patch.object(limits, "FILE", data / "upload-zeiten.json"),
                       mock.patch.object(system, "data_dir", lambda: data),
                       mock.patch.object(system, "running_flavors", lambda: self.running),
+                      mock.patch.object(system, "find_wow", lambda: None),  # nicht die echte Installation
                       mock.patch.object(api.Site, "post",
                                         lambda _site, path, payload, what: self.server.post(path, payload, what))):
             patch.start()

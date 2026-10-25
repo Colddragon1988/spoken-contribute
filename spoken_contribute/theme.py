@@ -80,26 +80,42 @@ def apply(root: tk.Tk, p: Palette):
     style.configure("Error.TLabel", foreground=p.error)
     style.configure("Link.TLabel", foreground=p.link)
 
-    # Klappliste der Comboboxen und künftige Fenster (Optionsdatenbank von Tk)
+    # Künftige Klapplisten der Comboboxen (Optionsdatenbank von Tk); vorhandene färbt paint um.
     for option, value in (("*TCombobox*Listbox.background", p.field), ("*TCombobox*Listbox.foreground", p.text),
                           ("*TCombobox*Listbox.selectBackground", p.selection),
                           ("*TCombobox*Listbox.selectForeground", p.selection_text)):
         root.option_add(option, value)
-    _paint(root, p)
+    paint(root, p)
 
 
-def _paint(widget: tk.Misc, p: Palette):
-    """Die klassischen Tk-Widgets (Fenster, Textfelder, Zeichenflächen) umfärben; ttk erledigt der Stil."""
+def paint(widget: tk.Misc, p: Palette):
+    """Die klassischen Tk-Widgets in `widget` und darunter umfärben (Fenster, Textfelder,
+    Zeichenflächen, Klapplisten); ttk-Widgets erledigt der Stil. Neue Fenster rufen das selbst auf."""
     if isinstance(widget, (tk.Tk, tk.Toplevel)):
         widget.configure(background=p.background)
         dark_title_bar(widget, p.dark)
     elif isinstance(widget, tk.Text):
         widget.configure(background=p.field, foreground=p.text, insertbackground=p.text,
-                         selectbackground=p.selection, selectforeground=p.selection_text)
+                         selectbackground=p.selection, selectforeground=p.selection_text,
+                         inactiveselectbackground=p.selection)
     elif isinstance(widget, tk.Canvas):
         widget.configure(background=p.field)
+    elif isinstance(widget, ttk.Combobox):
+        _paint_dropdown(widget, p)
     for child in widget.winfo_children():
-        _paint(child, p)
+        paint(child, p)
+
+
+def _paint_dropdown(combobox: ttk.Combobox, p: Palette):
+    """Die Klappliste einer Combobox legt Tk beim ersten Aufklappen an und färbt sie dann nach
+    der Optionsdatenbank; danach folgt sie keinem Wechsel mehr. tkinter kennt sie nicht als
+    Kind-Widget, also über Tcl: ttk::combobox::PopdownWindow liefert (und erzeugt) sie."""
+    try:
+        popdown = combobox.tk.call("ttk::combobox::PopdownWindow", combobox)
+        combobox.tk.call(f"{popdown}.f.l", "configure", "-background", p.field, "-foreground", p.text,
+                         "-selectbackground", p.selection, "-selectforeground", p.selection_text)
+    except tk.TclError:
+        pass  # andere Tk-Fassung mit anderem Aufbau: dann eben in den alten Farben
 
 
 def dark_title_bar(window: tk.Misc, dark: bool):

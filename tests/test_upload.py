@@ -1,8 +1,10 @@
 """Ganze Upload-Durchgänge gegen einen vorgetäuschten Server."""
 from __future__ import annotations
 
+import json
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from unittest import mock
 
 from helpers import Sandbox, contributions_lua, dbcache, envelope
 
@@ -71,6 +73,23 @@ class Contributions(Sandbox):
         self.assertIn("verändert", report.text())
         self.assertEqual(len(wowdata.envelopes_in(self.lua)), 2)
 
+    def test_file_needing_more_uploads_than_an_hour_allows_stays_untouched(self):
+        self.lua.write_bytes(contributions_lua([envelope(i) for i in range(limits.PER_HOUR + 1)]))
+        with mock.patch.object(upload, "MAX_ENVELOPES", 1):
+            report = self.run_upload()
+        self.assertTrue(report.failed)
+        self.assertIn("nicht hochladen", report.text())
+        self.assertEqual(self.server.calls, [])
+        self.assertEqual(len(wowdata.envelopes_in(self.lua)), limits.PER_HOUR + 1)
+
+    def test_archive_failure_clears_nothing(self):
+        self.lua.write_bytes(contributions_lua([envelope(1)]))
+        with mock.patch.object(history, "record", side_effect=OSError("Platte voll")):
+            report = self.run_upload()
+        self.assertTrue(report.failed)
+        self.assertIn("nicht archiviert", report.text())
+        self.assertEqual(wowdata.envelopes_in(self.lua), [envelope(1)])
+
     def test_dry_run_changes_nothing(self):
         self.lua.write_bytes(contributions_lua([envelope(1)]))
         report = self.run_upload(test=True)
@@ -109,6 +128,53 @@ class RateLimit(Sandbox):
         old = datetime.now().astimezone() - timedelta(hours=2)
         limits._save([old] * limits.PER_HOUR)
         self.assertEqual(limits.remaining(), limits.PER_HOUR)
+
+
+class UploadTimes(Sandbox):
+    """Die Datei upload-zeiten.json und die Rechnung, ab wann wieder ein Upload geht."""
+
+    def write(self, content):
+        limits.FILE.parent.mkdir(parents=True, exist_ok=True)
+        limits.FILE.write_text(content if isinstance(content, str) else json.dumps(content),
+                               encoding="utf-8")
+
+    def test_broken_entries_are_skipped(self):
+        recent = (datetime.now().astimezone() - timedelta(minutes=5)).isoformat()
+        cases = [("kaputt", 0), ("{}", 0), ("[1, null]", 0),
+                 (["2026-10-25T10:00:00"], 0),  # ohne Zeitzone; früher: TypeError
+                 (["kein Datum", recent], 1)]
+        for content, counted in cases:
+            with self.subTest(content=content):
+                self.write(content)
+                self.assertEqual(limits.remaining(), limits.PER_HOUR - counted)
+
+    def test_times_in_the_future_do_not_block(self):
+        """Wurde die Uhr zurückgestellt, sperrten sie sonst weit länger als eine Stunde."""
+        future = datetime.now().astimezone() + timedelta(days=1)
+        limits._save([future] * limits.PER_HOUR)
+        self.assertEqual(limits.remaining(), limits.PER_HOUR)
+
+    def test_free_at_counts_from_the_oldest_uploads(self):
+        now = datetime.now().astimezone()
+        stamps = [now - timedelta(minutes=50 - i) for i in range(limits.PER_HOUR)]
+        limits._save(stamps)
+        self.assertAlmostEqual(limits.free_at(1), stamps[0].replace(microsecond=0) + limits.WINDOW,
+                               delta=timedelta(seconds=1))
+        self.assertAlmostEqual(limits.free_at(3), stamps[2].replace(microsecond=0) + limits.WINDOW,
+                               delta=timedelta(seconds=1))
+
+    def test_free_at_with_more_than_an_hour_of_uploads(self):
+        limits._save([datetime.now().astimezone()] * 2)
+        self.assertIsNotNone(limits.free_at(limits.PER_HOUR + 5))  # früher: IndexError
+        limits._save([])
+        self.assertIsNone(limits.free_at(limits.PER_HOUR + 5))
+
+    def test_free_at_is_in_local_time(self):
+        """Gespeichert mit anderer Zeitzone (Reise, Sommerzeit): angezeigt wird Ortszeit."""
+        elsewhere = timezone(timedelta(hours=9))
+        limits._save([datetime.now(elsewhere) - timedelta(minutes=10)] * limits.PER_HOUR)
+        local = datetime.now().astimezone().utcoffset()
+        self.assertEqual(limits.free_at().utcoffset(), local)
 
 
 class NpcTexts(Sandbox):
