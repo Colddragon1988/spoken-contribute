@@ -139,7 +139,9 @@ def entries() -> list[Entry]:
                 found.append(Entry(path.parent, info))
         except (OSError, ValueError, KeyError, TypeError):
             continue  # beschädigt; der Ordner bleibt unberührt
-    return sorted(found, key=lambda e: e.time, reverse=True)
+    # Bei gleicher Sekunde entscheidet der Ordnername (…_zeilen-2 nach …_zeilen), damit die
+    # Reihenfolge nicht davon abhängt, in welcher Folge das Dateisystem die Ordner liefert.
+    return sorted(found, key=lambda e: (e.time, e.folder.name), reverse=True)
 
 
 def result_text(info: dict) -> str:

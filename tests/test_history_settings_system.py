@@ -27,7 +27,8 @@ class History(Sandbox):
                        payload={"gesendet": [{"lang": "deDE", "build": 1,
                                               "texts": [{"id": 9, "text": "Seid gegrüßt", "text1": ""}]}]},
                        when=now)
-        history.record("zeilen", {"status": "fehler", "versionen": ["Classic Era"], "fehler": "Server-Fehler 500"})
+        history.record("zeilen", {"status": "fehler", "versionen": ["Classic Era"], "fehler": "Server-Fehler 500"},
+                       when=now + timedelta(seconds=1))  # eigene Sekunde, sonst ist die Reihenfolge offen
         entries = history.entries()
         self.assertEqual([e.info["art"] for e in entries], ["zeilen", "npc-texte", "zeilen"])
         self.assertIn("quest 2", history.search_text(entries[2]))
