@@ -14,8 +14,8 @@ import itertools
 import json
 import re
 import shutil
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from . import system
@@ -224,3 +224,62 @@ def _text_lines(payload: dict) -> list[str]:
         lines.append(f"\nNicht gesendet (zu lang für den Server) – {len(skipped)} Texte:")
         lines += [f"#{t.get('id')}  {show(t.get('text') or t.get('text1', ''))}" for t in skipped]
     return lines
+
+
+# ---------------------------------------------------------------- Suche und Statistik
+
+def search_text(entry: Entry) -> str:
+    """Alles zu einem Upload in Kleinbuchstaben, zum Durchsuchen (Titel, Texte, Fehler …)."""
+    return details(entry).casefold()
+
+
+@dataclass
+class Statistics:
+    uploads: int = 0
+    failed: int = 0
+    lines: int = 0  # gesendete gesammelte Zeilen
+    lines_new: int = 0
+    lines_known: int = 0
+    texts: int = 0  # gesendete NPC-Texte
+    texts_new: int = 0
+    texts_changed: int = 0
+    per_version: dict = field(default_factory=dict)  # {Version: [Zeilen, NPC-Texte]}
+    first: datetime | None = None
+    last: datetime | None = None
+
+
+def statistics(found: list[Entry]) -> Statistics:
+    stats = Statistics()
+    for entry in found:
+        if entry.failed:
+            stats.failed += 1
+            continue
+        info, result = entry.info, entry.info.get("ergebnis") or {}
+        count = info.get("anzahl", 0)
+        stats.uploads += 1
+        stats.first = min(stats.first or entry.time, entry.time)
+        stats.last = max(stats.last or entry.time, entry.time)
+        column = 0 if info.get("art") == "zeilen" else 1
+        if column == 0:
+            stats.lines += count
+            stats.lines_new += result.get("neu", 0)
+            stats.lines_known += result.get("bekannt", 0)
+        else:
+            stats.texts += count
+            stats.texts_new += result.get("neu", 0)
+            stats.texts_changed += result.get("aktualisiert", 0)
+        for version in info.get("versionen", []) or ["?"]:
+            stats.per_version.setdefault(version, [0, 0])[column] += count
+    return stats
+
+
+def daily(found: list[Entry], days: int = 30) -> list[tuple[date, int, int]]:
+    """(Tag, gesammelte Zeilen, NPC-Texte) für die letzten `days` Tage bis heute."""
+    today = datetime.now().astimezone().date()
+    totals = {today - timedelta(days=n): [0, 0] for n in range(days)}
+    for entry in found:
+        day = entry.time.astimezone().date()
+        if entry.failed or day not in totals:
+            continue
+        totals[day][0 if entry.info.get("art") == "zeilen" else 1] += entry.info.get("anzahl", 0)
+    return [(day, *totals[day]) for day in sorted(totals)]

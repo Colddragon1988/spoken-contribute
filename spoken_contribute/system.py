@@ -173,12 +173,38 @@ def _running_programs() -> list[str]:
     return programs
 
 
-def _output(command: list[str]) -> list[str]:
+# ---------------------------------------------------------------- helles oder dunkles Design
+
+def prefers_dark() -> bool:
+    """Ob das System auf dunkles Design gestellt ist."""
+    if WINDOWS:
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as key:
+                return winreg.QueryValueEx(key, "AppsUseLightTheme")[0] == 0
+        except OSError:
+            return False
+    if MACOS:
+        return _output(["defaults", "read", "-g", "AppleInterfaceStyle"], timeout=3) == ["Dark"]
+    # Linux: die Desktop-Einstellung über das XDG-Portal (KDE, GNOME u. a.): 1 = dunkel …
+    answer = _output(["gdbus", "call", "--session", "--dest", "org.freedesktop.portal.Desktop",
+                      "--object-path", "/org/freedesktop/portal/desktop",
+                      "--method", "org.freedesktop.portal.Settings.Read",
+                      "org.freedesktop.appearance", "color-scheme"], timeout=3)
+    if answer:
+        return "uint32 1" in answer[0]
+    # … ohne Portal die GNOME-Einstellung
+    answer = _output(["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"], timeout=3)
+    return bool(answer) and "dark" in answer[0]
+
+
+def _output(command: list[str], timeout: float = 30) -> list[str]:
     try:
         # errors="replace": PowerShell gibt Pfade mit Umlauten in der Konsolen-Codepage aus,
         # die nicht zu Pythons Vorgabe passen muss – das darf nicht zum Absturz führen.
         result = subprocess.run(command, capture_output=True, text=True, errors="replace",
-                                timeout=30, creationflags=NO_WINDOW)
+                                timeout=timeout, creationflags=NO_WINDOW)
     except (OSError, subprocess.SubprocessError):
         return []
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]

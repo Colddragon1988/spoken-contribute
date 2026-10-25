@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from . import history, system
+from . import history, limits, system
 from .api import Site, UploadError
 from .wowdata import (CONTRIBUTIONS, backup_of, cache_files, cache_folders, clear_contributions,
                       collect_contributions, flavor_name, newest_texts, spoken_flavors, summarize)
@@ -49,19 +50,23 @@ class Report:
 
 @dataclass
 class Overview:
-    """Was gerade bereitliegt – für die Anzeige im Fenster."""
-    flavors: list[Path]
-    running: set[str] | None
-    lines: int
-    texts: int
+    """Was ein Upload jetzt senden würde – für die Anzeige im Fenster."""
+    flavors: list[Path]  # alle Versionen mit Spoken
+    running: set[str] | None  # wie system.running_flavors()
+    lines: int  # gesammelte Zeilen, ohne laufende Versionen
+    texts: int  # NPC-Texte, ohne laufende Versionen
+    uploads_left: int  # freie Uploads in dieser Stunde
+    free_at: datetime | None  # ab wann wieder einer geht, wenn keiner mehr frei ist
 
 
 def overview(wow: Path) -> Overview:
     flavors = spoken_flavors(wow)
-    lines = {e for _, _, envelopes in collect_contributions(flavors) for e in envelopes}
-    texts = sum(len(rows) for folder in cache_folders(flavors)
-                for rows in newest_texts(cache_files(folder)).values())
-    return Overview(flavors, system.running_flavors(), len(lines), texts)
+    running = system.running_flavors()
+    # Laufende Versionen überspringt der Upload, also zählen sie hier auch nicht mit.
+    idle = [] if running is None else [f for f in flavors if f.name.lower() not in running]
+    lines = {e for _, _, envelopes in collect_contributions(idle) for e in envelopes}
+    texts = sum(job.count for job in cache_jobs(idle))
+    return Overview(flavors, running, len(lines), texts, limits.remaining(), limits.free_at())
 
 
 # ---------------------------------------------------------------- gesammelte Zeilen
@@ -124,7 +129,13 @@ def send_envelopes(site: Site, envelopes: list[str]) -> list[dict]:
     answers = []
     for start in range(0, len(envelopes), MAX_ENVELOPES):
         payload = contribution_payload(envelopes[start:start + MAX_ENVELOPES])
-        result = site.post("/api/contributions/batch", payload, "Gesammelte Zeilen")
+        try:
+            result = site.post("/api/contributions/batch", payload, "Gesammelte Zeilen")
+        except UploadError as err:
+            if err.status == 429:
+                limits.note_refused()
+            raise
+        limits.note_upload()
         if not result.get("ok"):
             raise UploadError(f"Gesammelte Zeilen: unerwartete Antwort {str(result)[:200]}.")
         answers.append(result)
@@ -152,8 +163,15 @@ def upload_contributions(site: Site, flavors: list[Path], credentials, test: boo
     if batch.deferred:
         notes.append(f"{batch.deferred} weitere passen nicht mehr in diesen Upload (höchstens "
                      f"{MAX_ENVELOPES}) und gehen beim nächsten Mal mit.")
+    free_at = limits.free_at(uploads)
+    if free_at:
+        notes.append(f"Upload-Grenze erreicht ({limits.PER_HOUR} pro Stunde) – wieder möglich ab "
+                     f"{free_at:%H:%M} Uhr.")
     if test:
         return Outcome("\n  ".join([f"Gesammelte Zeilen: würde {kinds} senden ({origin}).", *notes]))
+    if free_at:  # gar nicht erst versuchen; der Server würde mit 429 ablehnen
+        return Outcome("\n  ".join([f"Gesammelte Zeilen: {kinds} bleiben vorerst liegen ({origin}).",
+                                    *notes]), failed=True)
 
     log(f"Gesammelte Zeilen: sende {len(batch.envelopes)} …")
     answers = send_envelopes(site, batch.envelopes)
@@ -283,6 +301,10 @@ def upload_caches(site: Site, flavors: list[Path], credentials, test: bool, log:
         if not credentials:
             return Outcome("NPC-Texte: nicht angemeldet – bitte im Fenster unter „Konto“ anmelden.\n"
                            "  Die Texte bleiben bis dahin im Spiel-Cache.", failed=True)
+        if not credentials.get("password"):
+            return Outcome("NPC-Texte: das Passwort war nicht aus dem Schlüsselbund zu holen (gesperrt "
+                           "oder abgelehnt?).\n  Bitte entsperren oder im Fenster ab- und neu anmelden; "
+                           "die Texte bleiben bis dahin im Spiel-Cache.", failed=True)
         sign_in(site, credentials)
 
     lines, sent, failed = [], False, False

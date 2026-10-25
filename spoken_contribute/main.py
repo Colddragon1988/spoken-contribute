@@ -20,6 +20,7 @@ def main(args: list[str]) -> int:
         history.migrate_old_archive()
     except (OSError, ValueError) as err:  # ValueError: ein unmöglicher Zeitpunkt im Dateinamen
         print(f"Altes Archiv nicht übernommen: {err}", file=sys.stderr)
+    settings.move_password_to_keyring()  # Passwort einer früheren Fassung aus login.json holen
     if args:
         return run_in_terminal(test="--test" in args)
     try:
@@ -37,6 +38,6 @@ def run_in_terminal(test: bool) -> int:
     if not config.wow_dir:
         print("Kein WoW-Ordner gefunden – bitte einmal im Fenster auswählen.")
         return 1
-    report = upload.run(Path(config.wow_dir), settings.load_login(), test=test, log=print)
+    report = upload.run(Path(config.wow_dir), settings.credentials(), test=test, log=print)
     print(report.text())
     return 1 if report.failed else 0

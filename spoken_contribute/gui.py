@@ -1,8 +1,9 @@
-"""Das Fenster: WoW-Ordner, Konto bei spoken.rusty.one, automatischer Upload, Ergebnis und
-der Verlauf aller Uploads.
+"""Das Fenster: WoW-Ordner, Konto bei spoken.rusty.one, automatischer Upload, Design, Ergebnis
+und der Verlauf aller Uploads mit Suche und Statistik.
 
-Netzwerk und Dateiarbeit laufen in einem Hintergrund-Thread, damit das Fenster nicht einfriert;
-Ergebnisse kommen über eine Warteschlange zurück in den Fenster-Thread (tkinter verlangt das)."""
+Netzwerk, Schlüsselbund und Dateiarbeit laufen in einem Hintergrund-Thread, damit das Fenster
+nicht einfriert; Ergebnisse kommen über eine Warteschlange zurück in den Fenster-Thread
+(tkinter verlangt, dass nur er die Widgets anfasst)."""
 from __future__ import annotations
 
 import queue
@@ -14,15 +15,13 @@ import webbrowser
 from pathlib import Path
 from tkinter import filedialog, font, messagebox, ttk
 
-from . import history, settings, system, upload
+from . import history, limits, settings, system, theme, upload
 from .api import REGISTER, Site, UploadError
 from .wowdata import flavor_name
 
 TITLE = "Spoken – Beiträge hochladen"
-ERROR_COLOR = "#b3261e"
-LINK_COLOR = "#1a5fb4"
-MUTED_COLOR = "#666666"
 PAD = 10
+THEME_CHECK_MS = 10_000  # so oft wird bei „Wie System“ nachgesehen, ob das System umgeschaltet hat
 
 
 def run_window() -> int:
@@ -33,12 +32,12 @@ def run_window() -> int:
         except (AttributeError, OSError):
             pass
     root = tk.Tk(className="spoken-contribute")
-    if not (system.WINDOWS or system.MACOS):
-        ttk.Style(root).theme_use("clam")  # das Linux-Standardthema von Tk wirkt sehr altmodisch
     App(root)
     root.mainloop()
     return 0
 
+
+# ---------------------------------------------------------------- kleine Bausteine
 
 def place_over(window: tk.Toplevel, parent: tk.Misc):
     """Ein Dialogfenster mittig über sein Hauptfenster setzen."""
@@ -59,7 +58,7 @@ def set_text(widget: tk.Text, text: str, *tags: str, append: bool = False):
 
 
 def text_box(parent: tk.Misc, **options) -> tk.Text:
-    """Schreibgeschütztes Textfeld mit Bildlaufleiste; liegt in einem eigenen Rahmen."""
+    """Schreibgeschütztes Textfeld mit Bildlaufleiste; liegt in einem eigenen Rahmen (.frame)."""
     frame = ttk.Frame(parent)
     frame.columnconfigure(0, weight=1)
     frame.rowconfigure(0, weight=1)
@@ -87,10 +86,11 @@ class App:
         self.events: queue.Queue = queue.Queue()
         self.busy = False
         self.history_window: HistoryWindow | None = None
+        self.palette = theme.choose(self.settings.theme)
 
         root.title(TITLE)
-        root.geometry("680x560")
-        root.minsize(560, 460)
+        root.geometry("700x600")
+        root.minsize(580, 480)
         root.protocol("WM_DELETE_WINDOW", self.close)
         root.report_callback_exception = self.show_crash
         base = font.nametofont("TkDefaultFont")
@@ -101,9 +101,11 @@ class App:
         self.small.configure(size=size - 1 if size > 0 else size + 1)
 
         self.build()
+        self.apply_theme()
         self.refresh_account()
         self.refresh_wow()
         root.after(50, self.poll)
+        root.after(THEME_CHECK_MS, self.check_system_theme)
         if self.settings.auto_upload:
             root.after(300, self.start_upload)
 
@@ -134,14 +136,20 @@ class App:
         self.account_label.grid(row=0, column=0, sticky="w")
         self.account_button = ttk.Button(box, command=self.toggle_account)
         self.account_button.grid(row=0, column=1)
-        hint = wrapping_label(box, font=self.small, foreground=MUTED_COLOR,
-                              text="Nur für die NPC-Texte aus dem Spiel-Cache nötig – die gesammelten "
-                                   "Zeilen gehen anonym hoch.")
-        hint.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        self.account_hint = wrapping_label(box, font=self.small, style="Muted.TLabel")
+        self.account_hint.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 0))
 
+        options = ttk.Frame(main)
+        options.grid(row=2, column=0, sticky="ew", pady=(PAD, 0))
         self.auto_var = tk.BooleanVar(value=self.settings.auto_upload)
-        ttk.Checkbutton(main, text="Beim Start automatisch hochladen", variable=self.auto_var,
-                        command=self.save_auto).grid(row=2, column=0, sticky="w", pady=(PAD, 0))
+        ttk.Checkbutton(options, text="Beim Start automatisch hochladen", variable=self.auto_var,
+                        command=self.save_auto).pack(side="left")
+        self.theme_var = tk.StringVar(value=settings.THEMES[self.settings.theme])
+        themes = ttk.Combobox(options, textvariable=self.theme_var, state="readonly", width=12,
+                              values=list(settings.THEMES.values()))
+        themes.bind("<<ComboboxSelected>>", lambda _e: self.change_theme())
+        themes.pack(side="right")
+        ttk.Label(options, text="Design:").pack(side="right", padx=(0, 6))
 
         box = ttk.LabelFrame(main, text="Ergebnis", padding=2)
         box.grid(row=3, column=0, sticky="nsew", pady=(PAD, 0))
@@ -150,8 +158,6 @@ class App:
         self.log = text_box(box, height=10)
         self.log.frame.grid(row=0, column=0, sticky="nsew")
         self.log.tag_configure("head", font=self.bold)
-        self.log.tag_configure("error", foreground=ERROR_COLOR)
-        self.log.tag_configure("muted", foreground=MUTED_COLOR)
         set_text(self.log, "„Jetzt hochladen“ sendet alles, was bereitliegt; „Testlauf“ zeigt nur, "
                            "was gesendet würde.", "muted")
 
@@ -166,6 +172,32 @@ class App:
                                         default="active")
         self.upload_button.grid(row=0, column=3)
         ttk.Button(bar, text="Schließen", command=self.close).grid(row=0, column=4, padx=(6, 0))
+
+    # ------------------------------------------------------------ Design
+
+    def apply_theme(self):
+        theme.apply(self.root, self.palette)
+        self.log.tag_configure("error", foreground=self.palette.error)
+        self.log.tag_configure("muted", foreground=self.palette.muted)
+        if self.history_window:
+            self.history_window.restyle()
+
+    def change_theme(self):
+        labels = {label: key for key, label in settings.THEMES.items()}
+        self.settings.theme = labels[self.theme_var.get()]
+        settings.save(self.settings)
+        self.background(lambda: theme.choose(self.settings.theme), self.theme_chosen)
+
+    def check_system_theme(self):
+        """Bei „Wie System“ einem Umschalten des Systems folgen (im Hintergrund nachgesehen)."""
+        if self.settings.theme == "system":
+            self.background(lambda: theme.choose("system"), self.theme_chosen)
+        self.root.after(THEME_CHECK_MS, self.check_system_theme)
+
+    def theme_chosen(self, palette: theme.Palette | None, error):
+        if palette and palette != self.palette:
+            self.palette = palette
+            self.apply_theme()
 
     # ------------------------------------------------------------ Hintergrundarbeit
 
@@ -227,10 +259,10 @@ class App:
             self.show_wow_status("Kein World of Warcraft gefunden – bitte über „Ändern …“ auswählen.", error=True)
 
     def show_wow_status(self, text: str, error: bool = False):
-        self.wow_status.configure(text=text, foreground=ERROR_COLOR if error else "")
+        self.wow_status.configure(text=text, style="Error.TLabel" if error else "TLabel")
 
     def refresh_wow(self):
-        """Zeigt, in welchen Versionen Spoken steckt, was läuft und was bereitliegt."""
+        """Zeigt, in welchen Versionen Spoken steckt, was läuft und was ein Upload jetzt senden würde."""
         wow = self.wow_path()
         if not system.is_wow_root(wow):
             self.show_wow_status("Hier liegt kein World of Warcraft – bitte über „Ändern …“ oder "
@@ -249,36 +281,55 @@ class App:
         if not overview.flavors:
             self.show_wow_status("Spoken ist in keiner WoW-Version in diesem Ordner installiert.", error=True)
             return
-        names = []
+        names, running = [], []
         for flavor in overview.flavors:
-            running = overview.running is None or flavor.name.lower() in overview.running
-            names.append(flavor_name(flavor) + (" (läuft gerade)" if running else ""))
+            if overview.running is None or flavor.name.lower() in overview.running:
+                running.append(flavor_name(flavor))
+                names.append(flavor_name(flavor) + " (läuft gerade)")
+            else:
+                names.append(flavor_name(flavor))
+        lines = [f"Spoken in: {', '.join(names)}"]
         if overview.running is None:
-            names.append("ein WoW läuft, Version unklar")
-        ready = [f"{overview.lines} gesammelte Zeilen"] if overview.lines else []
-        ready += [f"{overview.texts} NPC-Texte im Cache"] if overview.texts else []
-        self.show_wow_status(f"Spoken in: {', '.join(names)}\n"
-                             f"Bereit: {' und '.join(ready) if ready else 'nichts Neues'}")
+            lines.append("Ein WoW läuft, aber welche Version, ist nicht zu erkennen – bitte erst beenden.")
+        else:
+            ready = [f"{overview.lines} gesammelte Zeilen"] if overview.lines else []
+            ready += [f"{overview.texts} NPC-Texte"] if overview.texts else []
+            text = f"Bereit: {' und '.join(ready) if ready else 'nichts Neues'}"
+            if running:
+                text += f" (ohne {', '.join(running)} – wird beim Upload übersprungen)"
+            lines.append(text)
+        if overview.free_at:
+            lines.append(f"Upload-Grenze erreicht ({limits.PER_HOUR} pro Stunde) – gesammelte Zeilen "
+                         f"wieder ab {overview.free_at:%H:%M} Uhr.")
+        elif overview.uploads_left < limits.PER_HOUR:
+            lines.append(f"Noch {overview.uploads_left} von {limits.PER_HOUR} Uploads in dieser Stunde frei.")
+        self.show_wow_status("\n".join(lines))
 
     # ------------------------------------------------------------ Konto
 
     def refresh_account(self):
-        login = settings.load_login()
-        if login:
-            self.account_label.configure(text=f"Angemeldet als {login['email']}")
+        email = settings.account()
+        if email:
+            self.account_label.configure(text=f"Angemeldet als {email}")
             self.account_button.configure(text="Abmelden")
+            where = ("im Schlüsselbund des Systems" if settings.password_in_keyring()
+                     else "in einer Datei, die nur du lesen kannst (kein Schlüsselbund gefunden)")
+            self.account_hint.configure(text=f"Das Passwort liegt {where}. Die Anmeldung ist nur für die "
+                                             "NPC-Texte nötig – die gesammelten Zeilen gehen anonym hoch.")
         else:
             self.account_label.configure(text="Nicht angemeldet")
             self.account_button.configure(text="Anmelden …")
+            self.account_hint.configure(text="Nur für die NPC-Texte aus dem Spiel-Cache nötig – die "
+                                             "gesammelten Zeilen gehen anonym hoch.")
 
     def toggle_account(self):
-        if not settings.load_login():
+        if not settings.account():
             LoginDialog(self)
-        elif messagebox.askyesno("Abmelden", "Die Zugangsdaten von diesem Rechner löschen?\n\n"
-                                 "Ohne Anmeldung bleiben die NPC-Texte im Spiel-Cache liegen, bis du "
-                                 "dich wieder anmeldest.", parent=self.root):
-            settings.delete_login()
-            self.refresh_account()
+            return
+        if messagebox.askyesno("Abmelden", "Die Anmeldung von diesem Rechner löschen (auch aus dem "
+                               "Schlüsselbund)?\n\nOhne Anmeldung bleiben die NPC-Texte im Spiel-Cache "
+                               "liegen, bis du dich wieder anmeldest.", parent=self.root):
+            self.background(settings.delete_login, lambda _result, _error: self.refresh_account())
 
     def save_auto(self):
         self.settings.auto_upload = self.auto_var.get()
@@ -291,12 +342,15 @@ class App:
             return
         self.set_busy(True)
         set_text(self.log, ("Testlauf …" if test else "Lade hoch …") + "\n", "muted")
-        wow, credentials = self.wow_path(), settings.load_login()
+        wow = self.wow_path()
 
         def log(text: str):  # wird im Hintergrund-Thread aufgerufen
             self.events.put(lambda: set_text(self.log, text + "\n", "muted", append=True))
 
-        self.background(lambda: upload.run(wow, credentials, test=test, log=log), self.upload_done)
+        def work():  # das Passwort erst hier holen: der Schlüsselbund kann nachfragen
+            return upload.run(wow, settings.credentials(), test=test, log=log)
+
+        self.background(work, self.upload_done)
 
     def upload_done(self, report: upload.Report | None, error):
         self.set_busy(False)
@@ -347,13 +401,15 @@ class LoginDialog(tk.Toplevel):
         self.title("Bei spoken.rusty.one anmelden")
         self.transient(app.root)
         self.resizable(False, False)
+        self.configure(background=app.palette.background)
+        theme.dark_title_bar(self, app.palette.dark)
 
         body = ttk.Frame(self, padding=PAD * 1.5)
         body.pack(fill="both", expand=True)
         ttk.Label(body, wraplength=360, justify="left",
-                  text="Die Zugangsdaten werden nur auf diesem Rechner gespeichert, in einer Datei, "
-                       "die nur du lesen kannst.").grid(row=0, column=0, columnspan=2, sticky="w",
-                                                        pady=(0, PAD))
+                  text="Die Anmeldung bleibt auf diesem Rechner: das Passwort im Schlüsselbund des "
+                       "Systems, die E-Mail-Adresse in den Einstellungen.").grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, PAD))
         ttk.Label(body, text="E-Mail").grid(row=1, column=0, sticky="w", padx=(0, 8))
         self.email = ttk.Entry(body, width=36)
         self.email.grid(row=1, column=1, sticky="ew")
@@ -367,7 +423,7 @@ class LoginDialog(tk.Toplevel):
         self.message = ttk.Label(body, wraplength=360, justify="left")
         self.message.grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
         link = ttk.Label(body, text="Noch kein Konto? Auf spoken.rusty.one registrieren",
-                         foreground=LINK_COLOR, cursor="hand2", font=app.small)
+                         style="Link.TLabel", cursor="hand2", font=app.small)
         link.bind("<Button-1>", lambda _e: webbrowser.open(REGISTER))
         link.grid(row=5, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
@@ -392,69 +448,65 @@ class LoginDialog(tk.Toplevel):
             return  # die Prüfung läuft schon (Eingabetaste während des Wartens)
         email, password = self.email.get().strip(), self.password.get()
         if not email or not password:
-            self.message.configure(text="Bitte E-Mail und Passwort eingeben.", foreground=ERROR_COLOR)
+            self.message.configure(text="Bitte E-Mail und Passwort eingeben.", style="Error.TLabel")
             return
         self.submit_button.state(["disabled"])
-        self.message.configure(text="Prüfe die Anmeldung …", foreground="")
-        self.app.background(lambda: Site().sign_in(email, password),
-                            lambda _user, error: self.done(email, password, error))
+        self.message.configure(text="Prüfe die Anmeldung …", style="TLabel")
 
-    def done(self, email: str, password: str, error):
+        def work():  # erst prüfen, dann speichern – beides darf dauern (Netz, Schlüsselbund)
+            Site().sign_in(email, password)
+            settings.save_login(email, password)
+
+        self.app.background(work, lambda _result, error: self.done(error))
+
+    def done(self, error):
         if not self.winfo_exists():
-            return  # inzwischen abgebrochen
+            self.app.refresh_account()
+            return  # inzwischen geschlossen
         if error:
             text = str(error) if isinstance(error, UploadError) else f"Unerwarteter Fehler: {error!r}"
-            self.message.configure(text=text, foreground=ERROR_COLOR)
+            self.message.configure(text=text, style="Error.TLabel")
             self.submit_button.state(["!disabled"])
             return
-        settings.save_login(email, password)
         self.app.refresh_account()
         self.destroy()
 
 
 class HistoryWindow(tk.Toplevel):
-    """Alle archivierten Uploads als Tabelle; darunter alles zum gewählten Upload."""
+    """Alle archivierten Uploads: Tabelle mit Suche und Filtern, darunter alles zum gewählten
+    Upload; auf der zweiten Seite die Statistik mit einem Diagramm der letzten 30 Tage."""
 
     COLUMNS = (("zeit", "Zeitpunkt", 150, False), ("art", "Art", 150, False),
                ("version", "Version", 170, False), ("anzahl", "Anzahl", 70, False),
                ("ergebnis", "Ergebnis", 220, True))
+    ALL = "Alle"
+    KINDS = {ALL: None, "Gesammelte Zeilen": "zeilen", "NPC-Texte": "npc-texte", "Fehlgeschlagen": "fehler"}
+    CHART_DAYS = 30
 
     def __init__(self, app: App):
         super().__init__(app.root)
         self.app = app
-        self.entries: list[history.Entry] = []
+        self.entries: list[history.Entry] = []  # alle
+        self.shown: list[history.Entry] = []  # nach Suche und Filtern
+        self.search_cache: dict[Path, str] = {}
+        self.search_job = None
         self.title("Spoken – Verlauf der Uploads")
-        self.geometry("860x600")
-        self.minsize(600, 400)
+        self.geometry("900x640")
+        self.minsize(640, 440)
         self.protocol("WM_DELETE_WINDOW", self.close)
+        self.configure(background=app.palette.background)
+        theme.dark_title_bar(self, app.palette.dark)
 
         body = ttk.Frame(self, padding=PAD)
         body.pack(fill="both", expand=True)
         body.columnconfigure(0, weight=1)
         body.rowconfigure(1, weight=1)
-        self.summary = wrapping_label(body)
-        self.summary.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        self.build_filters(body)
 
-        panes = ttk.Panedwindow(body, orient="vertical")
-        panes.grid(row=1, column=0, sticky="nsew")
-        table = ttk.Frame(panes)
-        table.columnconfigure(0, weight=1)
-        table.rowconfigure(0, weight=1)
-        self.tree = ttk.Treeview(table, columns=[c[0] for c in self.COLUMNS], show="headings",
-                                 selectmode="browse", height=8)
-        for key, title, width, stretch in self.COLUMNS:
-            self.tree.heading(key, text=title, anchor="w")
-            self.tree.column(key, width=width, stretch=stretch, anchor="e" if key == "anzahl" else "w")
-        self.tree.tag_configure("fehler", foreground=ERROR_COLOR)
-        self.tree.bind("<<TreeviewSelect>>", lambda _e: self.show_selected())
-        scroll = ttk.Scrollbar(table, command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scroll.set)
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        scroll.grid(row=0, column=1, sticky="ns")
-        self.detail = text_box(panes)
-        self.detail.tag_configure("head", font=app.bold)
-        panes.add(table, weight=1)
-        panes.add(self.detail.frame, weight=2)
+        self.pages = ttk.Notebook(body)
+        self.pages.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
+        self.pages.add(self.build_list_page(self.pages), text="Uploads")
+        self.pages.add(self.build_statistics_page(self.pages), text="Statistik")
 
         bar = ttk.Frame(body)
         bar.grid(row=2, column=0, sticky="ew", pady=(PAD, 0))
@@ -463,25 +515,139 @@ class HistoryWindow(tk.Toplevel):
         ttk.Button(bar, text="Archiv öffnen", command=self.open_archive).pack(side="left", padx=(6, 0))
         ttk.Button(bar, text="Schließen", command=self.close).pack(side="right")
         self.bind("<Escape>", lambda _e: self.close())
+        theme.apply(app.root, app.palette)  # die neuen Textfelder und die Zeichenfläche einfärben
+        self.restyle()
         self.reload()
+
+    # ------------------------------------------------------------ Aufbau
+
+    def build_filters(self, parent: tk.Misc):
+        bar = ttk.Frame(parent)
+        bar.grid(row=0, column=0, sticky="ew")
+        bar.columnconfigure(1, weight=1)
+        ttk.Label(bar, text="Suchen:").grid(row=0, column=0, padx=(0, 6))
+        self.search_var = tk.StringVar()
+        search = ttk.Entry(bar, textvariable=self.search_var)
+        search.grid(row=0, column=1, sticky="ew")
+        search.bind("<KeyRelease>", lambda _e: self.schedule_filter())
+        ttk.Label(bar, text="Art:").grid(row=0, column=2, padx=(PAD, 6))
+        self.kind_var = tk.StringVar(value=self.ALL)
+        kinds = ttk.Combobox(bar, textvariable=self.kind_var, values=list(self.KINDS), state="readonly",
+                             width=17)
+        kinds.grid(row=0, column=3)
+        kinds.bind("<<ComboboxSelected>>", lambda _e: self.apply_filter())
+        ttk.Label(bar, text="Version:").grid(row=0, column=4, padx=(PAD, 6))
+        self.version_var = tk.StringVar(value=self.ALL)
+        self.versions = ttk.Combobox(bar, textvariable=self.version_var, state="readonly", width=14)
+        self.versions.grid(row=0, column=5)
+        self.versions.bind("<<ComboboxSelected>>", lambda _e: self.apply_filter())
+        self.summary = wrapping_label(bar, style="Muted.TLabel")
+        self.summary.grid(row=1, column=0, columnspan=6, sticky="ew", pady=(6, 0))
+
+    def build_list_page(self, parent: tk.Misc) -> ttk.Frame:
+        page = ttk.Frame(parent, padding=(0, 6, 0, 0))
+        page.columnconfigure(0, weight=1)
+        page.rowconfigure(0, weight=1)
+        panes = ttk.Panedwindow(page, orient="vertical")
+        panes.grid(row=0, column=0, sticky="nsew")
+        table = ttk.Frame(panes)
+        table.columnconfigure(0, weight=1)
+        table.rowconfigure(0, weight=1)
+        self.tree = ttk.Treeview(table, columns=[c[0] for c in self.COLUMNS], show="headings",
+                                 selectmode="browse", height=8)
+        for key, title, width, stretch in self.COLUMNS:
+            self.tree.heading(key, text=title, anchor="w")
+            self.tree.column(key, width=width, stretch=stretch, anchor="e" if key == "anzahl" else "w")
+        self.tree.bind("<<TreeviewSelect>>", lambda _e: self.show_selected())
+        scroll = ttk.Scrollbar(table, command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        scroll.grid(row=0, column=1, sticky="ns")
+        self.detail = text_box(panes)
+        self.detail.tag_configure("head", font=self.app.bold)
+        panes.add(table, weight=1)
+        panes.add(self.detail.frame, weight=2)
+        return page
+
+    def build_statistics_page(self, parent: tk.Misc) -> ttk.Frame:
+        page = ttk.Frame(parent, padding=(0, 6, 0, 0))
+        page.columnconfigure(0, weight=1)
+        page.rowconfigure(1, weight=1)
+        self.stats_text = text_box(page, height=7)
+        self.stats_text.tag_configure("head", font=self.app.bold)
+        self.stats_text.frame.grid(row=0, column=0, sticky="ew")
+        self.chart = tk.Canvas(page, highlightthickness=0, height=220)
+        self.chart.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
+        self.chart.bind("<Configure>", lambda _e: self.draw_chart())
+        return page
+
+    def restyle(self):
+        """Farben, die nicht über den ttk-Stil laufen (Tabellen-Markierungen, Treffer, Diagramm)."""
+        p = self.app.palette
+        self.tree.tag_configure("fehler", foreground=p.error)
+        self.detail.tag_configure("match", background=p.match)
+        self.draw_chart()
+
+    # ------------------------------------------------------------ Daten und Filter
 
     def reload(self):
         self.entries = history.entries()
+        self.search_cache.clear()
+        versions = sorted({v for e in self.entries for v in e.info.get("versionen", [])})
+        self.versions.configure(values=[self.ALL, *versions])
+        if self.version_var.get() not in (self.ALL, *versions):
+            self.version_var.set(self.ALL)
+        self.apply_filter()
+
+    def schedule_filter(self):
+        """Beim Tippen erst kurz warten, damit nicht nach jedem Buchstaben gesucht wird."""
+        if self.search_job:
+            self.after_cancel(self.search_job)
+        self.search_job = self.after(250, self.apply_filter)
+
+    def matches(self, entry: history.Entry) -> bool:
+        kind = self.KINDS[self.kind_var.get()]
+        if kind == "fehler" and not entry.failed:
+            return False
+        if kind not in (None, "fehler") and (entry.info.get("art") != kind or entry.failed):
+            return False
+        version = self.version_var.get()
+        if version != self.ALL and version not in entry.info.get("versionen", []):
+            return False
+        query = self.search_var.get().strip().casefold()
+        if not query:
+            return True
+        if entry.folder not in self.search_cache:
+            self.search_cache[entry.folder] = history.search_text(entry)
+        return query in self.search_cache[entry.folder]
+
+    def apply_filter(self):
+        self.search_job = None
+        self.shown = [e for e in self.entries if self.matches(e)]
         self.tree.delete(*self.tree.get_children())
-        for i, entry in enumerate(self.entries):
+        for i, entry in enumerate(self.shown):
             self.tree.insert("", "end", iid=str(i), values=history.row(entry),
                              tags=("fehler",) if entry.failed else ())
-        self.summary.configure(text=history.totals(self.entries) if self.entries else "")
-        if self.entries:
+        if not self.entries:
+            text = "Noch keine Uploads archiviert."
+        elif not self.shown:
+            text = "Keine Uploads passen zu Suche und Filter."
+        else:
+            text = history.totals(self.shown)
+            if len(self.shown) != len(self.entries):
+                text += f"   (gefiltert: {len(self.shown)} von {len(self.entries)})"
+        self.summary.configure(text=text)
+        if self.shown:
             self.tree.selection_set("0")
             self.tree.focus("0")
         else:
             self.open_button.state(["disabled"])
-            set_text(self.detail, "Noch keine Uploads archiviert.")
+            set_text(self.detail, "")
+        self.show_statistics()
 
     def selected(self) -> history.Entry | None:
         chosen = self.tree.selection()
-        return self.entries[int(chosen[0])] if chosen else None
+        return self.shown[int(chosen[0])] if chosen else None
 
     def show_selected(self):
         entry = self.selected()
@@ -491,7 +657,76 @@ class HistoryWindow(tk.Toplevel):
         head, _, rest = history.details(entry).partition("\n")
         set_text(self.detail, head + "\n", "head")
         set_text(self.detail, rest, append=True)
-        self.detail.see("1.0")
+        self.highlight(self.search_var.get().strip())
+
+    def highlight(self, query: str):
+        """Suchtreffer im Detailtext markieren und zum ersten springen."""
+        self.detail.tag_remove("match", "1.0", "end")
+        first, start = None, "1.0"
+        while query:
+            start = self.detail.search(query, start, "end", nocase=True)
+            if not start:
+                break
+            end = f"{start}+{len(query)}c"
+            self.detail.tag_add("match", start, end)
+            first = first or start
+            start = end
+        self.detail.see(first or "1.0")
+
+    # ------------------------------------------------------------ Statistik
+
+    def show_statistics(self):
+        s = history.statistics(self.shown)
+        head = "Statistik" + (" (gefiltert)" if len(self.shown) != len(self.entries) else "")
+        lines = [f"{s.uploads} Uploads" + (f", {s.failed} fehlgeschlagen" if s.failed else "")]
+        if s.first:
+            lines[0] += f" – vom {s.first.astimezone():%d.%m.%Y} bis {s.last.astimezone():%d.%m.%Y}"
+        lines.append(f"Gesammelte Zeilen: {s.lines} gesendet, {s.lines_new} neu für das Projekt, "
+                     f"{s.lines_known} schon bekannt")
+        lines.append(f"NPC-Texte: {s.texts} gesendet, {s.texts_new} neu, {s.texts_changed} aktualisiert")
+        for version, (line_count, text_count) in sorted(s.per_version.items()):
+            lines.append(f"    {version}: {line_count} Zeilen, {text_count} NPC-Texte")
+        set_text(self.stats_text, head + "\n", "head")
+        set_text(self.stats_text, "\n".join(lines), append=True)
+        self.stats_text.see("1.0")
+        self.draw_chart()
+
+    def draw_chart(self):
+        """Gestapelte Balken je Tag: gesammelte Zeilen und NPC-Texte der letzten 30 Tage."""
+        canvas, p, small = self.chart, self.app.palette, self.app.small
+        canvas.delete("all")
+        width, height = canvas.winfo_width(), canvas.winfo_height()
+        if width < 100 or height < 80:
+            return  # noch nicht sichtbar
+        days = history.daily(self.shown, self.CHART_DAYS)
+        peak = max(lines + texts for _, lines, texts in days) or 1
+        left, right, top, bottom = 44, 12, 34, height - 24
+        step = (width - left - right) / len(days)
+        bar = max(step * 0.7, 1)
+
+        canvas.create_text(left, 8, anchor="nw", fill=p.text, font=small,
+                           text=f"Gesendet pro Tag, letzte {self.CHART_DAYS} Tage")
+        x = width - right  # Legende von rechts nach links, Breite nach der Schrift bemessen
+        for color, label in ((p.chart_texts, "NPC-Texte"), (p.chart_lines, "Gesammelte Zeilen")):
+            x -= small.measure(label) + 14
+            canvas.create_rectangle(x, 10, x + 10, 20, fill=color, outline="")
+            canvas.create_text(x + 14, 15, anchor="w", fill=p.text, font=small, text=label)
+            x -= 16
+        canvas.create_line(left, bottom, width - right, bottom, fill=p.border)
+        canvas.create_text(left - 6, top, anchor="e", fill=p.muted, font=small, text=str(peak))
+        canvas.create_text(left - 6, bottom, anchor="e", fill=p.muted, font=small, text="0")
+        for i, (day, lines, texts) in enumerate(days):
+            x, y = left + i * step + (step - bar) / 2, bottom
+            for value, color in ((lines, p.chart_lines), (texts, p.chart_texts)):
+                if value:
+                    h = (bottom - top) * value / peak
+                    canvas.create_rectangle(x, y - h, x + bar, y, fill=color, outline="")
+                    y -= h
+            if i % 5 == 0 or i == len(days) - 1:
+                canvas.create_text(x + bar / 2, bottom + 4, anchor="n", fill=p.muted, font=small,
+                                   text=f"{day:%d.%m.}")
+
+    # ------------------------------------------------------------ Knöpfe
 
     def open_selected(self):
         entry = self.selected()
