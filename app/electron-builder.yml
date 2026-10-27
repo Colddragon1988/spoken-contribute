@@ -1,0 +1,34 @@
+appId: io.github.colddragon1988.spokenupload
+productName: Spoken-Upload
+directories:
+  output: release
+  buildResources: build
+files:
+  - dist/**/*
+  - package.json
+  - "!dist-dev/**"
+  - "!dist/**/*.map"
+asar: true
+electronFuses:
+  runAsNode: false
+  enableCookieEncryption: false
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
+  grantFileProtocolExtraPrivileges: false
+linux:
+  target: [AppImage, deb]
+  executableName: spoken-upload
+  syncDesktopName: true
+  category: Utility
+  maintainer: "Chenmo <48044372+Colddragon1988@users.noreply.github.com>"
+win:
+  target: nsis
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+mac:
+  target: dmg
+  category: public.app-category.utilities

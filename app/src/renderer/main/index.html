@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; manifest-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Spoken – Beiträge hochladen</title>
+  <link rel="stylesheet" href="../common/base.css">
+  <link rel="stylesheet" href="../common/theme.css">
+  <script src="./main.js" defer></script>
+</head>
+<body>
+  <fieldset id="rahmen-wow">
+    <legend>World of Warcraft</legend>
+    <div class="zeile">
+      <input id="wow-pfad" class="wachsen" type="text" spellcheck="false" autocomplete="off" aria-label="Ordner „World of Warcraft“">
+      <button id="wow-aendern" type="button">Ändern …</button>
+      <button id="wow-suchen" type="button">Suchen</button>
+    </div>
+    <div id="wow-status" class="mehrzeilig" role="status"></div>
+  </fieldset>
+
+  <fieldset id="rahmen-konto">
+    <legend>Konto bei spoken.rusty.one</legend>
+    <div class="zeile">
+      <span id="konto-text" class="wachsen"></span>
+      <button id="konto-knopf" type="button"></button>
+    </div>
+    <div id="konto-hinweis" class="gedaempft klein"></div>
+  </fieldset>
+
+  <div class="zeile" id="optionen">
+    <label class="kaestchen wachsen"><input id="auto-upload" type="checkbox">Beim Start automatisch hochladen</label>
+    <label for="design">Design:</label>
+    <select id="design">
+      <option value="system">Wie System</option>
+      <option value="hell">Hell</option>
+      <option value="dunkel">Dunkel</option>
+    </select>
+  </div>
+
+  <fieldset id="rahmen-ergebnis">
+    <legend>Ergebnis</legend>
+    <div id="protokoll" class="textfeld" role="log" aria-live="polite" tabindex="0"></div>
+  </fieldset>
+
+  <div class="leiste">
+    <button id="verlauf" type="button">Verlauf …</button>
+    <button id="testlauf" type="button">Testlauf</button>
+    <span class="luecke"></span>
+    <progress id="fortschritt" hidden aria-label="Upload läuft"></progress>
+    <button id="hochladen" type="button" class="standard">Jetzt hochladen</button>
+    <button id="schliessen" type="button">Schließen</button>
+  </div>
+
+  <dialog id="anmelden" aria-labelledby="anmelden-titel">
+    <h2 id="anmelden-titel">Bei spoken.rusty.one anmelden</h2>
+    <div class="klein">Die Anmeldung bleibt auf diesem Rechner: das Passwort im Schlüsselbund des Systems (ohne Schlüsselbund in einer Datei, die nur du lesen kannst), die E-Mail-Adresse in den Einstellungen.</div>
+    <div class="formular">
+      <label for="login-email">E-Mail</label>
+      <input id="login-email" type="email" autocomplete="off" spellcheck="false">
+      <label for="login-passwort">Passwort</label>
+      <input id="login-passwort" type="password" autocomplete="off" spellcheck="false">
+      <label class="kaestchen breit"><input id="login-zeigen" type="checkbox">Passwort anzeigen</label>
+    </div>
+    <div id="login-meldung" class="mehrzeilig" role="status"></div>
+    <div><button id="login-registrieren" type="button" class="link klein">Noch kein Konto? Auf spoken.rusty.one registrieren</button></div>
+    <div class="leiste">
+      <button id="login-abbrechen" type="button">Abbrechen</button>
+      <button id="login-senden" type="button" class="standard">Anmelden</button>
+    </div>
+  </dialog>
+</body>
+</html>

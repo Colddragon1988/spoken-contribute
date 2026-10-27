@@ -1,3 +1,17 @@
-__pycache__/
-*.pyc
 *.tmp
+
+# Electron / Node
+node_modules/
+dist/
+out/
+release/
+coverage/
+.vite/
+*.tsbuildinfo
+*.log
+test-results/
+playwright-report/
+.tmp-*/
+
+dist-dev/
+.eslintcache

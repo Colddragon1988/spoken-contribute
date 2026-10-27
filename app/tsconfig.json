@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023"],
+    "types": ["node"]
+  },
+  "include": [
+    "src/shared/**/*.ts",
+    "src/core/**/*.ts",
+    "src/main/**/*.ts",
+    "src/preload/**/*.ts",
+    "tests/**/*.ts",
+    "vitest.config.ts",
+    "playwright.config.ts"
+  ],
+  "exclude": ["src/renderer/**", "dist", "dist-dev", "release", "node_modules"]
+}

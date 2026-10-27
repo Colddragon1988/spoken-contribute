@@ -1,0 +1,63 @@
+/* Farben hell/dunkel – wörtlich aus der Python-Fassung (theme.py, Spezifikation §7.1).
+   Der Main setzt data-theme="hell|dunkel"; bis dahin gilt die Systemvorgabe. color-scheme
+   sorgt dafür, dass native Teile (Klapplisten, Bildlaufleisten, Kästchen) mitwechseln. */
+
+:root,
+:root[data-theme="hell"] {
+  color-scheme: light;
+  --background: #f2f2f2;
+  --field: #ffffff;
+  --text: #1f1f1f;
+  --muted: #666666;
+  --border: #c3c3c3;
+  --button: #e4e4e4;
+  --button-active: #d6d6d6;
+  --selection: #3d6fb4;
+  --selection-text: #ffffff;
+  --error: #b3261e;
+  --link: #1a5fb4;
+  --match: #ffe28a;
+  --chart-lines: #3d6fb4;
+  --chart-texts: #d9822b;
+  --backdrop: rgb(0 0 0 / 30%);
+}
+
+:root[data-theme="dunkel"] {
+  color-scheme: dark;
+  --background: #1e1f22;
+  --field: #2b2d31;
+  --text: #e3e3e3;
+  --muted: #9a9a9a;
+  --border: #45474d;
+  --button: #35373c;
+  --button-active: #43454b;
+  --selection: #3f5f8f;
+  --selection-text: #ffffff;
+  --error: #ff8a80;
+  --link: #8ab4f8;
+  --match: #6b5a1e;
+  --chart-lines: #6f9fe0;
+  --chart-texts: #f0a050;
+  --backdrop: rgb(0 0 0 / 60%);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+    --background: #1e1f22;
+    --field: #2b2d31;
+    --text: #e3e3e3;
+    --muted: #9a9a9a;
+    --border: #45474d;
+    --button: #35373c;
+    --button-active: #43454b;
+    --selection: #3f5f8f;
+    --selection-text: #ffffff;
+    --error: #ff8a80;
+    --link: #8ab4f8;
+    --match: #6b5a1e;
+    --chart-lines: #6f9fe0;
+    --chart-texts: #f0a050;
+    --backdrop: rgb(0 0 0 / 60%);
+  }
+}

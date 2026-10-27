@@ -1,0 +1,73 @@
+name: Electron
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.os }}, Node 22
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    defaults:
+      run:
+        shell: bash
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: Abhängigkeiten
+        run: npm ci
+      # Ubuntu 24.04 sperrt unprivilegierte User-Namespaces per AppArmor; ohne sie startet die
+      # Chromium-Sandbox von Electron nicht. Lieber das freigeben als --no-sandbox.
+      - name: Chromium-Sandbox erlauben (Linux)
+        if: runner.os == 'Linux'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      # Jede Prüfung hängt ihre Ausgabe an ci-ausgabe.txt an; schlägt eine fehl, zeigt der letzte
+      # Schritt das Ende davon als Hinweis am Lauf.
+      - name: Lint
+        run: |
+          set -o pipefail
+          echo "=== npm run lint" >> ci-ausgabe.txt
+          npm run lint 2>&1 | tee -a ci-ausgabe.txt
+      - name: Typprüfung
+        run: |
+          set -o pipefail
+          echo "=== npm run typecheck" >> ci-ausgabe.txt
+          npm run typecheck 2>&1 | tee -a ci-ausgabe.txt
+      - name: Unit- und Integrationstests
+        run: |
+          set -o pipefail
+          echo "=== npm test" >> ci-ausgabe.txt
+          npm test 2>&1 | tee -a ci-ausgabe.txt
+      - name: Bauen
+        run: |
+          set -o pipefail
+          echo "=== npm run build" >> ci-ausgabe.txt
+          npm run build 2>&1 | tee -a ci-ausgabe.txt
+      # Unter Linux gibt es keinen Bildschirm; Xvfb täuscht einen vor. Windows und macOS haben einen.
+      - name: UI-Tests
+        run: |
+          set -o pipefail
+          echo "=== npm run test:ui" >> ci-ausgabe.txt
+          ${{ runner.os == 'Linux' && 'xvfb-run -a ' || '' }}npm run test:ui 2>&1 | tee -a ci-ausgabe.txt
+      # Fehlgeschlagene Prüfungen als Hinweis am Lauf anzeigen – lesbar auch ohne Anmeldung.
+      - name: Fehler als Hinweis anzeigen
+        if: failure()
+        run: |
+          node --input-type=module - <<'EOF'
+          import { existsSync, readFileSync } from 'node:fs';
+          const text = existsSync('ci-ausgabe.txt') ? readFileSync('ci-ausgabe.txt', 'utf8') : 'keine Ausgabe';
+          const start = text.lastIndexOf('=== ');
+          let body = start >= 0 ? text.slice(start) : text;
+          if (body.length > 12000) body = body.slice(-12000);
+          body = body.replaceAll('%', '%25').replaceAll('\r', '').replaceAll('\n', '%0A');
+          console.log(`::error title=Fehlgeschlagene Prüfung::${body}`);
+          EOF

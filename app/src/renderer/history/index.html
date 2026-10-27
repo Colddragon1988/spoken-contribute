@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; manifest-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Spoken – Verlauf der Uploads</title>
+  <link rel="stylesheet" href="../common/base.css">
+  <link rel="stylesheet" href="../common/theme.css">
+  <script src="./history.js" defer></script>
+</head>
+<body>
+  <div class="filter">
+    <label for="suche">Suchen:</label>
+    <input id="suche" type="search" spellcheck="false" autocomplete="off">
+    <label for="art" class="abstand">Art:</label>
+    <select id="art">
+      <option value="alle">Alle</option>
+      <option value="zeilen">Gesammelte Zeilen</option>
+      <option value="npc-texte">NPC-Texte</option>
+      <option value="fehlgeschlagen">Fehlgeschlagen</option>
+    </select>
+    <label for="version" class="abstand">Version:</label>
+    <select id="version">
+      <option value="">Alle</option>
+    </select>
+    <div id="summe" class="gedaempft mehrzeilig" role="status"></div>
+  </div>
+
+  <div class="reiter" role="tablist">
+    <button id="reiter-uploads" type="button" role="tab" aria-selected="true" aria-controls="seite-uploads">Uploads</button>
+    <button id="reiter-statistik" type="button" role="tab" aria-selected="false" aria-controls="seite-statistik" tabindex="-1">Statistik</button>
+  </div>
+
+  <section id="seite-uploads" class="seite" role="tabpanel" aria-labelledby="reiter-uploads">
+    <div id="teiler">
+      <div class="tabelle">
+        <table aria-label="Uploads">
+          <colgroup>
+            <col class="zeit"><col class="art"><col class="version"><col class="anzahl"><col class="ergebnis">
+          </colgroup>
+          <thead>
+            <tr><th>Zeitpunkt</th><th>Art</th><th>Version</th><th class="zahl">Anzahl</th><th>Ergebnis</th></tr>
+          </thead>
+          <tbody id="zeilen" tabindex="0"></tbody>
+        </table>
+      </div>
+      <div id="griff" role="separator" aria-orientation="horizontal" aria-label="Höhe der Tabelle ändern" tabindex="0"></div>
+      <div id="details" class="textfeld" tabindex="0"></div>
+    </div>
+  </section>
+
+  <section id="seite-statistik" class="seite" role="tabpanel" aria-labelledby="reiter-statistik" hidden>
+    <div id="statistik-text" class="textfeld" tabindex="0"></div>
+    <div id="diagramm" role="img" aria-label="Gesendet pro Tag, letzte 30 Tage"></div>
+  </section>
+
+  <div class="leiste">
+    <button id="ordner" type="button" disabled>Ordner dieses Uploads öffnen</button>
+    <button id="archiv" type="button">Archiv öffnen</button>
+    <span class="luecke"></span>
+    <button id="schliessen" type="button">Schließen</button>
+  </div>
+</body>
+</html>

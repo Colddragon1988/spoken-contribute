@@ -1,0 +1,40 @@
+{
+  "name": "spoken-upload",
+  "productName": "Spoken-Upload",
+  "desktopName": "spoken-upload.desktop",
+  "version": "3.0.0",
+  "private": true,
+  "description": "Spoken – Beiträge hochladen (Electron-Fassung)",
+  "author": {
+    "name": "Chenmo",
+    "email": "48044372+Colddragon1988@users.noreply.github.com"
+  },
+  "homepage": "https://github.com/Colddragon1988/spoken-contribute",
+  "type": "module",
+  "main": "dist/main/main.cjs",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "lint": "eslint .",
+    "typecheck": "tsc -p tsconfig.json && tsc -p src/renderer/tsconfig.json",
+    "test": "vitest run --project unit",
+    "test:ui": "npm run build && playwright test",
+    "start:sandbox": "npm run build && node dist-dev/sandbox-start.cjs",
+    "dist": "npm run build && electron-builder --publish never"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.64.1",
+    "@types/node": "^22.18.0",
+    "electron": "45.0.0",
+    "electron-builder": "^26.18.0",
+    "esbuild": "^0.28.2",
+    "eslint": "^10.13.0",
+    "globals": "^17.13.0",
+    "typescript": "~6.0.3",
+    "typescript-eslint": "^8.72.1",
+    "vitest": "^5.0.5"
+  }
+}
